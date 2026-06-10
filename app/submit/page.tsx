@@ -2,13 +2,15 @@
 
 export const dynamic = 'force-dynamic';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { SubmitFormData } from '@/lib/types';
 import { AREAS, UNIVERSITIES, DEPARTMENTS, SUBJECTS, CURRICULUMS, STUDENT_LEVELS, ACADEMIC_YEARS, HOURS_PER_SESSION } from '@/lib/data';
 import { submitTuitionRecord, submitPendingItem } from '@/lib/benchmark';
+import { getDb } from '@/lib/firebase/config';
 import SearchableSelect from '@/components/ui/SearchableSelect';
 import MultiSelect from '@/components/ui/MultiSelect';
+import { collection, query, where, getDocs } from 'firebase/firestore';
 
 const DAYS = [2, 3, 4, 5, 6, 7];
 
@@ -51,7 +53,46 @@ export default function SubmitPage() {
   const [errors, setErrors] = useState<Errors>({});
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [allAreas, setAllAreas] = useState<string[]>(AREAS);
+  const [allSubjects, setAllSubjects] = useState<string[]>(SUBJECTS);
+  const [allUniversities, setAllUniversities] = useState<string[]>(UNIVERSITIES);
+  const [allDepartments, setAllDepartments] = useState<string[]>(DEPARTMENTS);
   const router = useRouter();
+
+  // Load approved custom items from Firestore and merge with static lists
+  useEffect(() => {
+    async function loadApprovedItems() {
+      try {
+        const db = await getDb();
+
+        const fetchApproved = async (col: string) => {
+          const q = query(collection(db, col), where('status', '==', 'approved'));
+          const snap = await getDocs(q);
+          return snap.docs.map((d) => d.data().value as string);
+        };
+
+        const [areas, subjects, universities, departments] = await Promise.all([
+          fetchApproved('pending_areas'),
+          fetchApproved('pending_subjects'),
+          fetchApproved('pending_universities'),
+          fetchApproved('pending_departments'),
+        ]);
+
+        // Merge with static lists, deduplicate, sort
+        const merge = (staticList: string[], dynamic: string[]) =>
+          Array.from(new Set([...staticList, ...dynamic])).sort((a, b) => a.localeCompare(b));
+
+        setAllAreas(merge(AREAS, areas));
+        setAllSubjects(merge(SUBJECTS, subjects));
+        setAllUniversities(merge(UNIVERSITIES, universities));
+        setAllDepartments(merge(DEPARTMENTS, departments));
+      } catch (e) {
+        console.error('Failed to load approved items:', e);
+      }
+    }
+
+    loadApprovedItems();
+  }, []);
 
   function update(field: keyof SubmitFormData, value: unknown) {
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -77,9 +118,7 @@ export default function SubmitPage() {
   }
 
   async function handleSubmit() {
-    // Honeypot check
     if (form.honeypot) return;
-
     if (!validate()) return;
 
     setSubmitting(true);
@@ -87,14 +126,14 @@ export default function SubmitPage() {
       const result = await submitTuitionRecord({
         salary: Number(form.salary),
         area: form.area,
-        curriculum: form.curriculum as SubmitFormData['curriculum'] extends '' ? never : SubmitFormData['curriculum'],
-        student_level: form.student_level as SubmitFormData['student_level'] extends '' ? never : SubmitFormData['student_level'],
+        curriculum: form.curriculum as NonNullable<SubmitFormData['curriculum']> extends '' ? never : SubmitFormData['curriculum'],
+        student_level: form.student_level as NonNullable<SubmitFormData['student_level']> extends '' ? never : SubmitFormData['student_level'],
         subjects: form.subjects,
         days_per_week: Number(form.days_per_week),
-        hours_per_session: form.hours_per_session as SubmitFormData['hours_per_session'] extends '' ? never : SubmitFormData['hours_per_session'],
+        hours_per_session: form.hours_per_session as NonNullable<SubmitFormData['hours_per_session']> extends '' ? never : SubmitFormData['hours_per_session'],
         university: form.university,
         department: form.department,
-        academic_year: form.academic_year as SubmitFormData['academic_year'] extends '' ? never : SubmitFormData['academic_year'],
+        academic_year: form.academic_year as NonNullable<SubmitFormData['academic_year']> extends '' ? never : SubmitFormData['academic_year'],
       } as Parameters<typeof submitTuitionRecord>[0]);
 
       if (result.success) {
@@ -144,7 +183,7 @@ export default function SubmitPage() {
         <div className="text-[#059669] text-xs font-bold tracking-wider uppercase mb-2">Anonymous Submission</div>
         <h1 className="text-2xl md:text-3xl font-bold text-[#0F172A] mb-2">Submit Tuition Salary</h1>
         <p className="text-[#64748B] text-sm">
-          No name, phone, or email collected. One assignment = one submission.
+          No name, phone, or email collected. One tuition = one submission.
         </p>
         <div className="mt-3 inline-flex items-center gap-1.5 bg-[#F0FDF4] border border-[#A7F3D0] text-[#059669] text-xs px-3 py-1.5 rounded-lg">
           <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
@@ -169,7 +208,7 @@ export default function SubmitPage() {
 
         {/* Salary */}
         <div className="p-6">
-          <SectionHeader title="Monthly Salary" desc="Your total monthly earnings for this assignment" />
+          <SectionHeader title="Monthly Salary" desc="Your total monthly earnings for this tuition" />
           <div>
             <FieldLabel required>Monthly Salary (BDT)</FieldLabel>
             <div className="relative">
@@ -189,13 +228,13 @@ export default function SubmitPage() {
           </div>
         </div>
 
-        {/* Assignment Details */}
+        {/* Tuition Details */}
         <div className="p-6">
           <SectionHeader title="Tuition Details" />
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="sm:col-span-2">
               <SearchableSelect
-                options={AREAS}
+                options={allAreas}
                 value={form.area}
                 onChange={(v) => update('area', v)}
                 label="Area"
@@ -238,7 +277,7 @@ export default function SubmitPage() {
             </div>
             <div className="sm:col-span-2">
               <MultiSelect
-                options={SUBJECTS}
+                options={allSubjects}
                 value={form.subjects}
                 onChange={(v) => update('subjects', v)}
                 label="Subjects"
@@ -298,7 +337,7 @@ export default function SubmitPage() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="sm:col-span-2">
               <SearchableSelect
-                options={UNIVERSITIES}
+                options={allUniversities}
                 value={form.university}
                 onChange={(v) => update('university', v)}
                 label="University"
@@ -313,7 +352,7 @@ export default function SubmitPage() {
             </div>
             <div>
               <SearchableSelect
-                options={DEPARTMENTS}
+                options={allDepartments}
                 value={form.department}
                 onChange={(v) => update('department', v)}
                 label="Department"
@@ -350,7 +389,7 @@ export default function SubmitPage() {
               <path d="M7 1a6 6 0 100 12A6 6 0 007 1zm.5 9h-1V6.5h1V10zM7 5.25a.75.75 0 110-1.5.75.75 0 010 1.5z" fill="currentColor"/>
             </svg>
             <p className="text-xs text-[#64748B] leading-relaxed">
-              By submitting, you confirm this is real data from an actual tuition assignment. Fake or inflated submissions harm the community.
+              By submitting, you confirm this is real data from an actual tuition. Fake or inflated submissions harm the community.
             </p>
           </div>
           <button
