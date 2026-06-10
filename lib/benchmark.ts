@@ -64,24 +64,36 @@ export async function fetchBenchmarkData(filters: BenchmarkFilters): Promise<Ben
   const cutoff = new Date(Date.now() - EIGHTEEN_MONTHS_MS);
   const cutoffTimestamp = Timestamp.fromDate(cutoff);
 
+  // Only filter by status in Firestore to avoid composite index requirements.
+  // All other filters (including date) are applied client-side.
+  // This trades a slightly larger read for zero index maintenance.
   const constraints: Parameters<typeof query>[1][] = [
     where('status', '==', 'approved'),
-    where('created_at', '>=', cutoffTimestamp),
   ];
-
-  if (filters.area) constraints.push(where('area', '==', filters.area));
-  if (filters.student_level) constraints.push(where('student_level', '==', filters.student_level));
-  if (filters.curriculum) constraints.push(where('curriculum', '==', filters.curriculum));
-  if (filters.university) constraints.push(where('university', '==', filters.university));
-  if (filters.department) constraints.push(where('department', '==', filters.department));
-  if (filters.academic_year) constraints.push(where('academic_year', '==', filters.academic_year));
-  if (filters.days_per_week) constraints.push(where('days_per_week', '==', filters.days_per_week));
 
   const q = query(collection(db, 'tuition_records'), ...constraints);
   const snap = await getDocs(q);
 
   let docs = snap.docs;
 
+  // Date filter — client-side
+  docs = docs.filter((d) => {
+    const record = d.data() as TuitionRecord;
+    if (!record.created_at) return true; // include if no timestamp yet (just submitted)
+    const ts = record.created_at instanceof Timestamp
+      ? record.created_at
+      : Timestamp.fromDate(new Date(record.created_at as unknown as string));
+    return ts >= cutoffTimestamp;
+  });
+
+  // Field filters — client-side
+  if (filters.area) docs = docs.filter((d) => d.data().area === filters.area);
+  if (filters.student_level) docs = docs.filter((d) => d.data().student_level === filters.student_level);
+  if (filters.curriculum) docs = docs.filter((d) => d.data().curriculum === filters.curriculum);
+  if (filters.university) docs = docs.filter((d) => d.data().university === filters.university);
+  if (filters.department) docs = docs.filter((d) => d.data().department === filters.department);
+  if (filters.academic_year) docs = docs.filter((d) => d.data().academic_year === filters.academic_year);
+  if (filters.days_per_week) docs = docs.filter((d) => d.data().days_per_week === filters.days_per_week);
   if (filters.subjects && filters.subjects.length > 0) {
     docs = docs.filter((d) => {
       const record = d.data() as TuitionRecord;
