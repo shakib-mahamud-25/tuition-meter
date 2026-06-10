@@ -1,0 +1,38 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isAdmin() { return request.auth != null; }
+    function isValidSubmission() {
+      let data = request.resource.data;
+      return data.salary is number && data.salary >= 500 && data.salary <= 500000
+        && data.area is string && data.area.size() > 0 && data.area.size() <= 100
+        && data.curriculum in ['Bangla Medium', 'English Version', 'English Medium']
+        && data.student_level is string
+        && data.subjects is list && data.subjects.size() >= 1 && data.subjects.size() <= 10
+        && data.days_per_week is number && data.days_per_week >= 2 && data.days_per_week <= 7
+        && data.university is string && data.department is string && data.academic_year is string;
+    }
+    match /tuition_records/{id} {
+      allow read: if resource.data.status == 'approved';
+      allow create: if isValidSubmission();
+      allow update, delete: if isAdmin();
+    }
+    match /pending_areas/{id} {
+      allow create: if request.resource.data.value is string && request.resource.data.value.size() <= 100;
+      allow read, update, delete: if isAdmin();
+    }
+    match /pending_subjects/{id} {
+      allow create: if request.resource.data.value is string && request.resource.data.value.size() <= 100;
+      allow read, update, delete: if isAdmin();
+    }
+    match /pending_universities/{id} {
+      allow create: if request.resource.data.value is string && request.resource.data.value.size() <= 200;
+      allow read, update, delete: if isAdmin();
+    }
+    match /pending_departments/{id} {
+      allow create: if request.resource.data.value is string && request.resource.data.value.size() <= 200;
+      allow read, update, delete: if isAdmin();
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}
