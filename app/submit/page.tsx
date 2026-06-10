@@ -191,7 +191,7 @@ export default function SubmitPage() {
 
         {/* Assignment Details */}
         <div className="p-6">
-          <SectionHeader title="Assignment Details" />
+          <SectionHeader title="Tuition Details" />
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="sm:col-span-2">
               <SearchableSelect
