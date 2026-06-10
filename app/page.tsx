@@ -84,7 +84,7 @@ export default function HomePage() {
             {
               num: '01',
               title: 'Submit anonymously',
-              desc: 'Tutors submit salary details with no name, phone, or email required. One assignment equals one record.',
+              desc: 'Tutors submit salary details with no name, phone, or email required. One tuition equals one record.',
               icon: (
                 <svg width="20" height="20" viewBox="0 0 20 20" fill="none" className="text-[#059669]">
                   <path d="M10 2v8m0 0l-3-3m3 3l3-3M3 14v1a2 2 0 002 2h10a2 2 0 002-2v-1" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
