@@ -3,6 +3,7 @@
 import { useState, useCallback, useEffect } from 'react'
 import { submitTuitionRecord, submitPendingItem, fetchApprovedOptions } from '../lib/benchmark'
 import { trackSalarySubmit, trackCustomItemAdded } from '../lib/analytics'
+import { AREAS, SUBJECTS, UNIVERSITIES, DEPARTMENTS } from '../lib/data' // Imported data layers as robust fallbacks
 import type { SubmitFormData, ApprovedOptions, Curriculum, StudentLevel, AcademicYear, HoursPerSession, TuitionRecord } from '../lib/types'
 
 const initialForm: SubmitFormData = {
@@ -44,10 +45,35 @@ export function useSubmitForm(): UseSubmitFormReturn {
   const [optionsLoading, setOptionsLoading] = useState(true)
 
   useEffect(() => {
+    let isMounted = true
+    
     fetchApprovedOptions()
-      .then(setOptions)
-      .catch(() => setOptions(null))
-      .finally(() => setOptionsLoading(false))
+      .then((data) => {
+        if (isMounted) {
+          setOptions(data)
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to fetch custom option definitions from firestore:", error)
+        // Production deployment safety fallback: merge local data lists so options never render empty
+        if (isMounted) {
+          setOptions({
+            areas: [...AREAS].sort(),
+            subjects: [...SUBJECTS].sort(),
+            universities: [...UNIVERSITIES].sort(),
+            departments: [...DEPARTMENTS].sort(),
+          })
+        }
+      })
+      .finally(() => {
+        if (isMounted) {
+          setOptionsLoading(false)
+        }
+      })
+
+    return () => {
+      isMounted = false
+    }
   }, [])
 
   const update = useCallback((field: keyof SubmitFormData, value: unknown) => {
@@ -55,30 +81,32 @@ export function useSubmitForm(): UseSubmitFormReturn {
     setErrors(prev => ({ ...prev, [field]: undefined }))
   }, [])
 
-  const validate = (): boolean => {
+  const validate = useCallback((currentForm: SubmitFormData): boolean => {
     const newErrors: Partial<Record<keyof SubmitFormData, string>> = {}
-    const salary = parseInt(form.salary)
-    if (!form.salary || isNaN(salary) || salary < 500 || salary > 500000) {
+    const salary = parseInt(currentForm.salary)
+    
+    if (!currentForm.salary || isNaN(salary) || salary < 500 || salary > 500000) {
       newErrors.salary = 'Enter a salary between ৳500 and ৳500,000'
     }
-    if (!form.area) newErrors.area = 'Select an area'
-    if (!form.curriculum) newErrors.curriculum = 'Select a curriculum'
-    if (!form.student_level) newErrors.student_level = 'Select a student level'
-    if (form.subjects.length === 0) newErrors.subjects = 'Select at least one subject'
-    if (!form.days_per_week) newErrors.days_per_week = 'Select days per week'
-    if (!form.hours_per_session) newErrors.hours_per_session = 'Select hours per session'
-    if (!form.university) newErrors.university = 'Select a university'
-    if (!form.department) newErrors.department = 'Select a department'
-    if (!form.academic_year) newErrors.academic_year = 'Select academic year'
+    if (!currentForm.area) newErrors.area = 'Select an area'
+    if (!currentForm.curriculum) newErrors.curriculum = 'Select a curriculum'
+    if (!currentForm.student_level) newErrors.student_level = 'Select a student level'
+    if (!currentForm.subjects || currentForm.subjects.length === 0) newErrors.subjects = 'Select at least one subject'
+    if (!currentForm.days_per_week) newErrors.days_per_week = 'Select days per week'
+    if (!currentForm.hours_per_session) newErrors.hours_per_session = 'Select hours per session'
+    if (!currentForm.university) newErrors.university = 'Select a university'
+    if (!currentForm.department) newErrors.department = 'Select a department'
+    if (!currentForm.academic_year) newErrors.academic_year = 'Select academic year'
+    
     setErrors(newErrors)
     return Object.keys(newErrors).length === 0
-  }
+  }, [])
 
   const handleSubmit = useCallback(async () => {
-    // Honeypot check
+    // Honeypot bot protection filter check
     if (form.honeypot) return
 
-    if (!validate()) return
+    if (!validate(form)) return
 
     setSubmitting(true)
     try {
@@ -106,7 +134,7 @@ export function useSubmitForm(): UseSubmitFormReturn {
     } finally {
       setSubmitting(false)
     }
-  }, [form])
+  }, [form, validate])
 
   const reset = useCallback(() => {
     setForm(initialForm)
@@ -117,34 +145,48 @@ export function useSubmitForm(): UseSubmitFormReturn {
   const addCustomArea = useCallback(async (value: string) => {
     await submitPendingItem('pending_areas', value)
     await trackCustomItemAdded('area', value)
-    setOptions(prev => prev ? { ...prev, areas: [...prev.areas, value].sort() } : prev)
+    setOptions(prev => prev ? { ...prev, areas: [...new Set([...prev.areas, value])].sort() } : prev)
     update('area', value)
   }, [update])
 
   const addCustomSubject = useCallback(async (value: string) => {
     await submitPendingItem('pending_subjects', value)
     await trackCustomItemAdded('subject', value)
-    setOptions(prev => prev ? { ...prev, subjects: [...prev.subjects, value].sort() } : prev)
-    update('subjects', [...form.subjects, value])
-  }, [update, form.subjects])
+    setOptions(prev => prev ? { ...prev, subjects: [...new Set([...prev.subjects, value])].sort() } : prev)
+    setForm(prev => {
+      const updatedSubjects = [...new Set([...prev.subjects, value])]
+      return { ...prev, subjects: updatedSubjects }
+    })
+    setErrors(prev => ({ ...prev, subjects: undefined }))
+  }, [])
 
   const addCustomUniversity = useCallback(async (value: string) => {
     await submitPendingItem('pending_universities', value)
     await trackCustomItemAdded('university', value)
-    setOptions(prev => prev ? { ...prev, universities: [...prev.universities, value].sort() } : prev)
+    setOptions(prev => prev ? { ...prev, universities: [...new Set([...prev.universities, value])].sort() } : prev)
     update('university', value)
   }, [update])
 
   const addCustomDepartment = useCallback(async (value: string) => {
     await submitPendingItem('pending_departments', value)
     await trackCustomItemAdded('department', value)
-    setOptions(prev => prev ? { ...prev, departments: [...prev.departments, value].sort() } : prev)
+    setOptions(prev => prev ? { ...prev, departments: [...new Set([...prev.departments, value])].sort() } : prev)
     update('department', value)
   }, [update])
 
   return {
-    form, errors, submitting, submitted, options, optionsLoading,
-    update, handleSubmit, reset,
-    addCustomArea, addCustomSubject, addCustomUniversity, addCustomDepartment,
+    form,
+    errors,
+    submitting,
+    submitted,
+    options,
+    optionsLoading,
+    update,
+    handleSubmit,
+    reset,
+    addCustomArea,
+    addCustomSubject,
+    addCustomUniversity,
+    addCustomDepartment,
   }
 }
