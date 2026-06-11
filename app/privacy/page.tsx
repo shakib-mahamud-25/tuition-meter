@@ -18,7 +18,7 @@ export default function PrivacyPage() {
   return (
     <div className="max-w-2xl mx-auto px-4 sm:px-6 py-14">
       <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 mb-2">Privacy Policy</h1>
-      <p className="text-slate-500 text-sm mb-10">Last updated: January 2025</p>
+      <p className="text-slate-500 text-sm mb-10">Last updated: June 2026</p>
 
       <Section title="1. What data we collect">
         <p>TuitionMeter collects only the tuition-related data you voluntarily submit: salary amount, area, student level, curriculum, subjects, days per week, hours per session, university, department, and academic year.</p>
