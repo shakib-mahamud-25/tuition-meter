@@ -22,6 +22,15 @@ import type {
   ConfidenceLevel,
 } from './types'
 
+// ─── String Normalization Helper ──────────────────────────────────────────────
+/**
+ * Trims whitespace and normalizes casing to ensure robust data matching 
+ * across user-generated custom entries and static assets.
+ */
+function normalizeString(str: string | undefined | null): string {
+  return str ? str.trim().toLowerCase() : ''
+}
+
 // ─── Formatting ───────────────────────────────────────────────────────────────
 
 export function formatBDT(amount: number): string {
@@ -105,18 +114,45 @@ export async function fetchBenchmarkData(
     return ts >= cutoff
   })
 
-  // Apply all other filters client-side
-  if (filters.area) records = records.filter(r => r.area === filters.area)
-  if (filters.student_level) records = records.filter(r => r.student_level === filters.student_level)
-  if (filters.curriculum) records = records.filter(r => r.curriculum === filters.curriculum)
-  if (filters.university) records = records.filter(r => r.university === filters.university)
-  if (filters.department) records = records.filter(r => r.department === filters.department)
-  if (filters.academic_year) records = records.filter(r => r.academic_year === filters.academic_year)
-  if (filters.days_per_week) records = records.filter(r => r.days_per_week === filters.days_per_week)
+  // Normalize target filters for fuzzy/resilient comparison
+  const targetArea = normalizeString(filters.area)
+  const targetStudentLevel = normalizeString(filters.student_level)
+  const targetCurriculum = normalizeString(filters.curriculum)
+  const targetUniversity = normalizeString(filters.university)
+  const targetDepartment = normalizeString(filters.department)
+  const targetAcademicYear = normalizeString(filters.academic_year)
+  const targetDaysPerWeek = normalizeString(filters.days_per_week)
+
+  // Apply all other filters client-side with full string normalization safety checks
+  if (filters.area) {
+    records = records.filter(r => normalizeString(r.area) === targetArea)
+  }
+  if (filters.student_level) {
+    records = records.filter(r => normalizeString(r.student_level) === targetStudentLevel)
+  }
+  if (filters.curriculum) {
+    records = records.filter(r => normalizeString(r.curriculum) === targetCurriculum)
+  }
+  if (filters.university) {
+    records = records.filter(r => normalizeString(r.university) === targetUniversity)
+  }
+  if (filters.department) {
+    records = records.filter(r => normalizeString(r.department) === targetDepartment)
+  }
+  if (filters.academic_year) {
+    records = records.filter(r => normalizeString(r.academic_year) === targetAcademicYear)
+  }
+  if (filters.days_per_week) {
+    records = records.filter(r => normalizeString(r.days_per_week) === targetDaysPerWeek)
+  }
+  
   if (filters.subjects && filters.subjects.length > 0) {
-    records = records.filter(r =>
-      filters.subjects!.some(s => r.subjects.includes(s))
-    )
+    const targetSubjectsNormalized = filters.subjects.map(s => normalizeString(s))
+    records = records.filter(r => {
+      if (!r.subjects || !Array.isArray(r.subjects)) return false
+      const recordSubjectsNormalized = r.subjects.map(s => normalizeString(s))
+      return targetSubjectsNormalized.some(ts => recordSubjectsNormalized.includes(ts))
+    })
   }
 
   const salaries = records.map(r => r.salary).sort((a, b) => a - b)
@@ -244,7 +280,10 @@ export async function fetchApprovedOptions(): Promise<ApprovedOptions> {
   ])
 
   const merge = (base: string[], snaps: typeof areasSnap) => {
-    const extra = snaps.docs.map(d => (d.data() as { value: string }).value)
+    const extra = snaps.docs.map(d => {
+      const val = (d.data() as { value: string }).value
+      return val ? val.trim() : '' // Robust fallback to trim random text inputs
+    }).filter(Boolean)
     return [...new Set([...base, ...extra])].sort()
   }
 
