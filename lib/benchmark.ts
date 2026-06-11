@@ -269,17 +269,37 @@ export async function rejectAllInQueue(
   )
 }
 
-// ─── Fetch approved options (for submit form) ─────────────────────────────────
-// Returns static lists directly — no Firestore read required.
-// pending_* collections require auth to read, so we never call them from
-// an unauthenticated context. Static lists are always complete and instant.
+// ─── Fetch approved options (for submit form + benchmark filters) ─────────────
+// Merges static base lists with admin-approved custom items from Firestore.
+// pending_* collections are now publicly readable (firestore.rules updated).
 
 export async function fetchApprovedOptions(): Promise<ApprovedOptions> {
-  return {
-    areas: [...AREAS].sort(),
-    subjects: [...SUBJECTS].sort(),
-    universities: [...UNIVERSITIES].sort(),
-    departments: [...DEPARTMENTS].sort(),
+  try {
+    const db = await getDb()
+    const [areasSnap, subjectsSnap, unisSnap, deptsSnap] = await Promise.all([
+      getDocs(query(collection(db, 'pending_areas'), where('status', '==', 'approved'))),
+      getDocs(query(collection(db, 'pending_subjects'), where('status', '==', 'approved'))),
+      getDocs(query(collection(db, 'pending_universities'), where('status', '==', 'approved'))),
+      getDocs(query(collection(db, 'pending_departments'), where('status', '==', 'approved'))),
+    ])
+    const merge = (base: string[], snap: typeof areasSnap) => {
+      const extra = snap.docs.map(d => (d.data() as { value: string }).value)
+      return [...new Set([...base, ...extra])].sort()
+    }
+    return {
+      areas: merge(AREAS, areasSnap),
+      subjects: merge(SUBJECTS, subjectsSnap),
+      universities: merge(UNIVERSITIES, unisSnap),
+      departments: merge(DEPARTMENTS, deptsSnap),
+    }
+  } catch {
+    // Firestore unavailable — fall back to static lists
+    return {
+      areas: [...AREAS].sort(),
+      subjects: [...SUBJECTS].sort(),
+      universities: [...UNIVERSITIES].sort(),
+      departments: [...DEPARTMENTS].sort(),
+    }
   }
 }
 
@@ -294,12 +314,19 @@ export async function fetchSiteStats(): Promise<SiteStats> {
   const areas = new Set(records.map(r => r.area))
   const universities = new Set(records.map(r => r.university))
   const subjects = new Set(records.flatMap(r => r.subjects))
+  const salaries = records.map(r => r.salary).sort((a, b) => a - b)
+  const avg = salaries.length > 0
+    ? Math.round(salaries.reduce((s, v) => s + v, 0) / salaries.length)
+    : 0
 
   return {
     total_reports: records.length,
     areas_covered: areas.size,
     universities_covered: universities.size,
     subjects_covered: subjects.size,
+    highest_salary: salaries.length > 0 ? salaries[salaries.length - 1] : 0,
+    lowest_salary: salaries.length > 0 ? salaries[0] : 0,
+    avg_salary: avg,
   }
 }
 

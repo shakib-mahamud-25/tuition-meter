@@ -30,21 +30,9 @@ function SkeletonCard() {
 }
 
 export function BenchmarkResult({ stats, loading, filtersApplied, error }: BenchmarkResultProps) {
-  // Empty state
+  // Empty state — only shown if somehow filtersApplied is false and not loading
   if (!filtersApplied && !loading) {
-    return (
-      <div className="flex flex-col items-center justify-center py-20 text-center px-4">
-        <div className="w-14 h-14 rounded-2xl bg-[#F1F5F9] flex items-center justify-center mb-4">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#94A3B8" strokeWidth="1.5">
-            <circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" />
-          </svg>
-        </div>
-        <h3 className="font-semibold text-slate-700 text-lg mb-2">Set your filters to get started</h3>
-        <p className="text-slate-400 text-sm max-w-xs">
-          Choose an area, student level, or curriculum — then click Apply Filters to see salary benchmarks.
-        </p>
-      </div>
-    )
+    return null
   }
 
   // Loading state

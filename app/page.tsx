@@ -1,24 +1,63 @@
 import Link from 'next/link'
 import { fetchSiteStats } from '../lib/benchmark'
+import { formatBDT } from '../lib/benchmark'
 
-async function SiteStats() {
+async function HeroStats() {
   try {
     const stats = await fetchSiteStats()
-    const items = [
+    const counts = [
       { value: stats.total_reports.toLocaleString(), label: 'Salary Reports' },
       { value: stats.areas_covered.toString(), label: 'Areas Covered' },
       { value: stats.universities_covered.toString(), label: 'Universities' },
       { value: stats.subjects_covered.toString(), label: 'Subjects' },
     ]
     return (
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-10 max-w-2xl mx-auto">
-        {items.map(item => (
-          <div key={item.label} className="text-center">
-            <p className="text-3xl font-bold text-white tabular-nums">{item.value}</p>
-            <p className="text-slate-400 text-sm mt-0.5">{item.label}</p>
+      <>
+        {/* Count pills */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-10 max-w-2xl mx-auto">
+          {counts.map(item => (
+            <div key={item.label} className="text-center">
+              <p className="text-3xl font-bold text-white tabular-nums">{item.value}</p>
+              <p className="text-slate-400 text-sm mt-0.5">{item.label}</p>
+            </div>
+          ))}
+        </div>
+
+        {/* Salary snapshot — only show if we have data */}
+        {stats.total_reports > 0 && (
+          <div className="mt-10 max-w-2xl mx-auto">
+            <p className="text-slate-500 text-xs font-semibold uppercase tracking-widest mb-4 text-center">
+              Live Salary Snapshot
+            </p>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="bg-white/5 border border-white/10 rounded-2xl px-4 py-5 text-center">
+                <p className="text-xs text-slate-400 mb-1.5 uppercase tracking-wide">Highest</p>
+                <p className="text-xl sm:text-2xl font-bold text-white tabular-nums">
+                  {formatBDT(stats.highest_salary)}
+                </p>
+                <p className="text-slate-500 text-xs mt-1">/month</p>
+              </div>
+              <div className="bg-[#059669]/10 border border-[#059669]/30 rounded-2xl px-4 py-5 text-center">
+                <p className="text-xs text-[#059669] mb-1.5 uppercase tracking-wide font-semibold">Average</p>
+                <p className="text-xl sm:text-2xl font-bold text-white tabular-nums">
+                  {formatBDT(stats.avg_salary)}
+                </p>
+                <p className="text-slate-500 text-xs mt-1">/month</p>
+              </div>
+              <div className="bg-white/5 border border-white/10 rounded-2xl px-4 py-5 text-center">
+                <p className="text-xs text-slate-400 mb-1.5 uppercase tracking-wide">Lowest</p>
+                <p className="text-xl sm:text-2xl font-bold text-white tabular-nums">
+                  {formatBDT(stats.lowest_salary)}
+                </p>
+                <p className="text-slate-500 text-xs mt-1">/month</p>
+              </div>
+            </div>
+            <p className="text-center text-slate-600 text-xs mt-3">
+              Based on {stats.total_reports.toLocaleString()} approved reports · updated in real time
+            </p>
           </div>
-        ))}
-      </div>
+        )}
+      </>
     )
   } catch {
     return null
@@ -58,7 +97,7 @@ export default function HomePage() {
             </Link>
           </div>
         </div>
-        <SiteStats />
+        <HeroStats />
       </section>
 
       {/* ── How it works ────────────────────────────────────────── */}
@@ -71,7 +110,6 @@ export default function HomePage() {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
             {[
               {
-                step: '1',
                 title: 'Submit anonymously',
                 desc: 'Share your tuition details — area, student level, subjects, days, and salary. No name, no contact, no personal info.',
                 icon: (
@@ -82,7 +120,6 @@ export default function HomePage() {
                 ),
               },
               {
-                step: '2',
                 title: 'Data is aggregated',
                 desc: 'Your report is reviewed and added to the pool. Statistics are calculated across all approved reports.',
                 icon: (
@@ -93,7 +130,6 @@ export default function HomePage() {
                 ),
               },
               {
-                step: '3',
                 title: 'Get instant benchmarks',
                 desc: 'Filter by area, student level, curriculum, or your university. See median salary, IQR range, and confidence level.',
                 icon: (
@@ -103,7 +139,7 @@ export default function HomePage() {
                 ),
               },
             ].map(item => (
-              <div key={item.step} className="bg-[#F8FAFC] border border-[#E2E8F0] rounded-2xl p-6">
+              <div key={item.title} className="bg-[#F8FAFC] border border-[#E2E8F0] rounded-2xl p-6">
                 <div className="w-10 h-10 rounded-xl bg-[#D1FAE5] flex items-center justify-center mb-4">
                   {item.icon}
                 </div>

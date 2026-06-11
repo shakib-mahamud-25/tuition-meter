@@ -1,10 +1,11 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { SearchableSelect } from '../ui/SearchableSelect'
 import { MultiSelect } from '../ui/MultiSelect'
 import { AREAS, STUDENT_LEVELS, CURRICULUMS, ACADEMIC_YEARS, SUBJECTS, UNIVERSITIES, DEPARTMENTS } from '../../lib/data'
-import type { BenchmarkFilters, StudentLevel, Curriculum, AcademicYear } from '../../lib/types'
+import { fetchApprovedOptions } from '../../lib/benchmark'
+import type { BenchmarkFilters, StudentLevel, Curriculum, AcademicYear, ApprovedOptions } from '../../lib/types'
 
 interface FilterSidebarProps {
   filters: BenchmarkFilters
@@ -24,6 +25,18 @@ export function FilterSidebar({
   loading,
 }: FilterSidebarProps) {
   const [local, setLocal] = useState<BenchmarkFilters>(filters)
+
+  // Start with static lists; upgrade to merged list (static + approved custom) async
+  const [options, setOptions] = useState<ApprovedOptions>({
+    areas: [...AREAS].sort(),
+    subjects: [...SUBJECTS].sort(),
+    universities: [...UNIVERSITIES].sort(),
+    departments: [...DEPARTMENTS].sort(),
+  })
+
+  useEffect(() => {
+    fetchApprovedOptions().then(setOptions).catch(() => {})
+  }, [])
 
   const update = (key: keyof BenchmarkFilters, value: unknown) => {
     setLocal(prev => ({ ...prev, [key]: value || undefined }))
@@ -59,7 +72,7 @@ export function FilterSidebar({
         <div>
           <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Location</p>
           <SearchableSelect
-            options={AREAS}
+            options={options.areas}
             value={local.area || ''}
             onChange={v => update('area', v)}
             placeholder="Search area..."
@@ -98,28 +111,26 @@ export function FilterSidebar({
         {/* Subjects */}
         <div>
           <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Subjects</p>
-          <div className="relative">
-            <MultiSelect
-              options={SUBJECTS}
-              value={local.subjects || []}
-              onChange={v => update('subjects', v.length > 0 ? v : undefined)}
-              placeholder="Any subject"
-            />
-          </div>
+          <MultiSelect
+            options={options.subjects}
+            value={local.subjects || []}
+            onChange={v => update('subjects', v.length > 0 ? v : undefined)}
+            placeholder="Any subject"
+          />
         </div>
 
-        {/* Tutor */}
+        {/* Tutor Background */}
         <div>
           <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Tutor Background</p>
           <div className="space-y-2">
             <SearchableSelect
-              options={UNIVERSITIES}
+              options={options.universities}
               value={local.university || ''}
               onChange={v => update('university', v)}
               placeholder="University..."
             />
             <SearchableSelect
-              options={DEPARTMENTS}
+              options={options.departments}
               value={local.department || ''}
               onChange={v => update('department', v)}
               placeholder="Department..."

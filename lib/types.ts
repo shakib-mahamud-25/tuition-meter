@@ -82,6 +82,9 @@ export interface SiteStats {
   areas_covered: number
   universities_covered: number
   subjects_covered: number
+  highest_salary: number
+  lowest_salary: number
+  avg_salary: number
 }
 
 export interface AdminStats {
