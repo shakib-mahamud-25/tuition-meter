@@ -111,6 +111,7 @@ function QueuePanel({
   onApprove,
   onReject,
   onRefresh,
+  onApproveAll,
 }: {
   title: string
   queueType: string
@@ -120,6 +121,7 @@ function QueuePanel({
   onApprove: (type: string, id: string) => void
   onReject: (type: string, id: string) => void
   onRefresh: (type: string) => void
+  onApproveAll: (type: string) => void
 }) {
   return (
     <div className="bg-[#1E293B] border border-[#1E3A8A]/40 rounded-2xl overflow-hidden">
@@ -132,13 +134,24 @@ function QueuePanel({
             </span>
           )}
         </div>
-        <button
-          onClick={() => onRefresh(queueType)}
-          disabled={loading}
-          className="text-xs text-slate-400 hover:text-white transition-colors disabled:opacity-50"
-        >
-          {loading ? 'Loading...' : '↻ Refresh'}
-        </button>
+        <div className="flex items-center gap-3">
+          {items.length > 0 && (
+            <button
+              onClick={() => onApproveAll(queueType)}
+              disabled={loading || processing !== null}
+              className="text-xs text-emerald-400 hover:text-emerald-300 font-semibold transition-colors disabled:opacity-40"
+            >
+              ✓ Approve All
+            </button>
+          )}
+          <button
+            onClick={() => onRefresh(queueType)}
+            disabled={loading}
+            className="text-xs text-slate-400 hover:text-white transition-colors disabled:opacity-50"
+          >
+            {loading ? 'Loading...' : '↻ Refresh'}
+          </button>
+        </div>
       </div>
 
       {loading ? (
@@ -177,14 +190,14 @@ function QueuePanel({
                   <div className="flex gap-2 flex-shrink-0">
                     <button
                       onClick={() => onApprove(queueType, item.id!)}
-                      disabled={processing === item.id}
+                      disabled={processing === item.id || processing === 'all'}
                       className="px-3 py-1.5 bg-[#059669] hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-50"
                     >
                       Approve
                     </button>
                     <button
                       onClick={() => onReject(queueType, item.id!)}
-                      disabled={processing === item.id}
+                      disabled={processing === item.id || processing === 'all'}
                       className="px-3 py-1.5 bg-slate-700 hover:bg-red-900 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-50"
                     >
                       Reject
@@ -206,10 +219,35 @@ function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () 
   const { items, loading, processing, approve, reject, refresh, refreshAll } = useAdminQueue()
   const [adminStats, setAdminStats] = useState<AdminStats | null>(null)
 
+  const triggerStatsRefresh = useCallback(() => {
+    fetchAdminStats().then(setAdminStats).catch(() => {})
+  }, [])
+
   useEffect(() => {
     refreshAll()
-    fetchAdminStats().then(setAdminStats).catch(() => {})
-  }, [refreshAll])
+    triggerStatsRefresh()
+  }, [refreshAll, triggerStatsRefresh])
+
+  // Bulk action implementation wrapper
+  const handleApproveAll = useCallback(async (queueType: string) => {
+    const activeItems = items[queueType as keyof typeof items] || []
+    if (activeItems.length === 0) return
+
+    const confirmAction = window.confirm(`Are you sure you want to approve all ${activeItems.length} items in the "${queueType}" queue?`)
+    if (!confirmAction) return
+
+    // Sequentially process items using the custom hook's core approve function
+    for (const item of activeItems) {
+      try {
+        await approve(queueType, item.id)
+      } catch (err) {
+        console.error(`Failed to bulk approve item: ${item.id}`, err)
+      }
+    }
+    
+    // Refresh administrative global counts once calculation cycles complete
+    triggerStatsRefresh()
+  }, [items, approve, triggerStatsRefresh])
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8">
@@ -253,6 +291,7 @@ function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () 
           onApprove={approve}
           onReject={reject}
           onRefresh={refresh}
+          onApproveAll={handleApproveAll}
         />
         <QueuePanel
           title="New Areas"
@@ -263,6 +302,7 @@ function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () 
           onApprove={approve}
           onReject={reject}
           onRefresh={refresh}
+          onApproveAll={handleApproveAll}
         />
         <QueuePanel
           title="New Subjects"
@@ -273,6 +313,7 @@ function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () 
           onApprove={approve}
           onReject={reject}
           onRefresh={refresh}
+          onApproveAll={handleApproveAll}
         />
         <QueuePanel
           title="New Universities"
@@ -283,6 +324,7 @@ function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () 
           onApprove={approve}
           onReject={reject}
           onRefresh={refresh}
+          onApproveAll={handleApproveAll}
         />
         <QueuePanel
           title="New Departments"
@@ -293,6 +335,7 @@ function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () 
           onApprove={approve}
           onReject={reject}
           onRefresh={refresh}
+          onApproveAll={handleApproveAll}
         />
       </div>
     </div>
