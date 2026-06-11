@@ -1,0 +1,83 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Tuition records ──────────────────────────────────────────────
+    // Anyone can read approved records (for benchmark queries)
+    // Anyone can create new records (anonymous submissions)
+    // Only authenticated admins can update (approve/reject)
+    match /tuition_records/{recordId} {
+      allow read: if resource.data.status == 'approved';
+      allow create: if isValidRecord(request.resource.data);
+      allow update: if request.auth != null;
+      allow delete: if false;
+    }
+
+    // ── Pending custom items ─────────────────────────────────────────
+    // Public create; admin read/update
+    match /pending_areas/{id} {
+      allow read: if request.auth != null;
+      allow create: if isValidPendingItem(request.resource.data);
+      allow update: if request.auth != null;
+      allow delete: if false;
+    }
+
+    match /pending_subjects/{id} {
+      allow read: if request.auth != null;
+      allow create: if isValidPendingItem(request.resource.data);
+      allow update: if request.auth != null;
+      allow delete: if false;
+    }
+
+    match /pending_universities/{id} {
+      allow read: if request.auth != null;
+      allow create: if isValidPendingItem(request.resource.data);
+      allow update: if request.auth != null;
+      allow delete: if false;
+    }
+
+    match /pending_departments/{id} {
+      allow read: if request.auth != null;
+      allow create: if isValidPendingItem(request.resource.data);
+      allow update: if request.auth != null;
+      allow delete: if false;
+    }
+
+    // ── Admin reads all records (for moderation dashboard) ───────────
+    match /tuition_records/{recordId} {
+      allow read: if request.auth != null;
+    }
+
+    // ── Helper functions ─────────────────────────────────────────────
+    function isValidRecord(data) {
+      return data.keys().hasAll([
+          'salary', 'area', 'curriculum', 'student_level',
+          'subjects', 'days_per_week', 'hours_per_session',
+          'university', 'department', 'academic_year',
+          'status', 'is_suspicious', 'source_version', 'submitted_from'
+        ])
+        && data.salary is int
+        && data.salary >= 500
+        && data.salary <= 500000
+        && data.status == 'pending'
+        && data.subjects is list
+        && data.subjects.size() >= 1
+        && data.subjects.size() <= 10
+        && data.days_per_week is int
+        && data.days_per_week >= 1
+        && data.days_per_week <= 7
+        && data.area is string
+        && data.area.size() <= 100
+        && data.university is string
+        && data.university.size() <= 100;
+    }
+
+    function isValidPendingItem(data) {
+      return data.keys().hasAll(['value', 'status'])
+        && data.value is string
+        && data.value.size() >= 2
+        && data.value.size() <= 100
+        && data.status == 'pending';
+    }
+  }
+}
