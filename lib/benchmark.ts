@@ -388,3 +388,37 @@ export async function updateRecordFields(
   const db = await getDb()
   await updateDoc(doc(db, 'tuition_records', id), { ...fields })
 }
+
+// ─── Fetch ALL items from a pending collection (admin "All" tabs) ─────────────
+
+export interface PendingItemDoc {
+  id: string
+  value: string
+  status: 'pending' | 'approved' | 'rejected'
+  submitted_at?: Timestamp | null
+}
+
+export async function fetchAllPendingItems(
+  collectionName: string
+): Promise<PendingItemDoc[]> {
+  const db = await getDb()
+  const snap = await getDocs(collection(db, collectionName))
+  return snap.docs
+    .map(d => ({ id: d.id, ...(d.data() as Omit<PendingItemDoc, 'id'>) }))
+    .sort((a, b) => {
+      const ta = a.submitted_at instanceof Timestamp ? a.submitted_at.toMillis() : 0
+      const tb = b.submitted_at instanceof Timestamp ? b.submitted_at.toMillis() : 0
+      return tb - ta
+    })
+}
+
+// ─── Update a pending item's value and/or status ──────────────────────────────
+
+export async function updatePendingItem(
+  collectionName: string,
+  id: string,
+  fields: Partial<Pick<PendingItemDoc, 'value' | 'status'>>
+): Promise<void> {
+  const db = await getDb()
+  await updateDoc(doc(db, collectionName, id), { ...fields })
+}

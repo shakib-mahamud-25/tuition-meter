@@ -5,7 +5,11 @@ export const dynamic = 'force-dynamic'
 import { useState, useEffect, useCallback } from 'react'
 import { useAdminQueue } from '../../hooks/useAdminQueue'
 import { getAuthErrorMessage } from '../../lib/errors'
-import { formatBDT, fetchAdminStats, fetchAllRecords, updateRecordFields, fetchApprovedOptions } from '../../lib/benchmark'
+import {
+  formatBDT, fetchAdminStats, fetchAllRecords, updateRecordFields,
+  fetchApprovedOptions, fetchAllPendingItems, updatePendingItem,
+} from '../../lib/benchmark'
+import type { PendingItemDoc } from '../../lib/benchmark'
 import { trackAdminLogin, trackAdminLogout } from '../../lib/analytics'
 import { STUDENT_LEVELS, CURRICULUMS, ACADEMIC_YEARS, HOURS_PER_SESSION } from '../../lib/data'
 import type { AdminStats, TuitionRecord, ApprovedOptions } from '../../lib/types'
@@ -21,7 +25,14 @@ function formatDate(ts: unknown): string {
   } catch { return '—' }
 }
 
-// ─── Login Screen ──────────────────────────────────────────────────────────────
+const PENDING_COLLECTIONS: Record<string, string> = {
+  areas: 'pending_areas',
+  subjects: 'pending_subjects',
+  universities: 'pending_universities',
+  departments: 'pending_departments',
+}
+
+// ─── Login ────────────────────────────────────────────────────────────────────
 
 function LoginScreen({ onLogin }: { onLogin: () => void }) {
   const [email, setEmail] = useState('')
@@ -31,20 +42,15 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
 
   const handleLogin = async () => {
     if (!email || !password) { setError('Enter your email and password.'); return }
-    setLoading(true)
-    setError('')
+    setLoading(true); setError('')
     try {
       const { signInWithEmailAndPassword } = await import('firebase/auth')
       const { getAuthInstance } = await import('../../lib/firebase/config')
       const auth = await getAuthInstance()
       await signInWithEmailAndPassword(auth, email, password)
-      await trackAdminLogin()
-      onLogin()
-    } catch (e) {
-      setError(getAuthErrorMessage(e))
-    } finally {
-      setLoading(false)
-    }
+      await trackAdminLogin(); onLogin()
+    } catch (e) { setError(getAuthErrorMessage(e))
+    } finally { setLoading(false) }
   }
 
   return (
@@ -53,9 +59,9 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
         <div className="text-center mb-7">
           <div className="w-10 h-10 rounded-xl bg-[#059669] flex items-center justify-center mx-auto mb-4">
             <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <rect x="2" y="9" width="3" height="7" rx="1" fill="white" />
-              <rect x="7.5" y="5" width="3" height="11" rx="1" fill="white" />
-              <rect x="13" y="2" width="3" height="14" rx="1" fill="white" />
+              <rect x="2" y="9" width="3" height="7" rx="1" fill="white"/>
+              <rect x="7.5" y="5" width="3" height="11" rx="1" fill="white"/>
+              <rect x="13" y="2" width="3" height="14" rx="1" fill="white"/>
             </svg>
           </div>
           <h1 className="text-white font-bold text-xl">Admin Panel</h1>
@@ -66,13 +72,13 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
             <label className="block text-xs text-slate-400 mb-1.5">Email</label>
             <input type="email" value={email} onChange={e => setEmail(e.target.value)}
               placeholder="admin@example.com" onKeyDown={e => e.key === 'Enter' && handleLogin()}
-              className="w-full px-3.5 py-2.5 bg-[#0F172A] border border-[#1E3A8A]/40 rounded-lg text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-[#059669] focus:ring-2 focus:ring-emerald-900" />
+              className="w-full px-3.5 py-2.5 bg-[#0F172A] border border-[#1E3A8A]/40 rounded-lg text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-[#059669] focus:ring-2 focus:ring-emerald-900"/>
           </div>
           <div>
             <label className="block text-xs text-slate-400 mb-1.5">Password</label>
             <input type="password" value={password} onChange={e => setPassword(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && handleLogin()} placeholder="••••••••"
-              className="w-full px-3.5 py-2.5 bg-[#0F172A] border border-[#1E3A8A]/40 rounded-lg text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-[#059669] focus:ring-2 focus:ring-emerald-900" />
+              className="w-full px-3.5 py-2.5 bg-[#0F172A] border border-[#1E3A8A]/40 rounded-lg text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-[#059669] focus:ring-2 focus:ring-emerald-900"/>
           </div>
           {error && <p className="text-red-400 text-xs bg-red-950/40 border border-red-900/40 rounded-lg px-3 py-2">{error}</p>}
           <button onClick={handleLogin} disabled={loading}
@@ -85,13 +91,25 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
   )
 }
 
-// ─── Record Detail Modal (view + edit) ────────────────────────────────────────
+// ─── Shared status badge ──────────────────────────────────────────────────────
+
+function StatusBadge({ status }: { status: string }) {
+  const cfg: Record<string, string> = {
+    approved: 'bg-emerald-900/40 text-emerald-400 border-emerald-700/40',
+    pending:  'bg-amber-900/40  text-amber-400  border-amber-700/40',
+    rejected: 'bg-red-900/40   text-red-400   border-red-700/40',
+  }
+  return (
+    <span className={`inline-block px-2.5 py-0.5 text-xs font-semibold rounded-full border ${cfg[status] || 'border-slate-700 text-slate-400'}`}>
+      {status}
+    </span>
+  )
+}
+
+// ─── Salary Record Modal (view + edit) ───────────────────────────────────────
 
 function RecordModal({
-  record,
-  options,
-  onClose,
-  onSaved,
+  record, options, onClose, onSaved,
 }: {
   record: TuitionRecord & { id: string }
   options: ApprovedOptions
@@ -103,173 +121,210 @@ function RecordModal({
   const [saveError, setSaveError] = useState('')
   const [draft, setDraft] = useState<TuitionRecord & { id: string }>({ ...record })
 
-  // Close on Escape
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
   }, [onClose])
 
-  const field = (label: string, content: React.ReactNode) => (
+  const F = (label: string, content: React.ReactNode) => (
     <div className="py-2.5 border-b border-[#1E3A8A]/30 last:border-0">
       <p className="text-slate-500 text-xs uppercase tracking-wide mb-1 font-medium">{label}</p>
       <div className="text-white text-sm">{content}</div>
     </div>
   )
 
-  const textInput = (key: keyof TuitionRecord, opts?: string[]) => {
-    if (!editing) return <span>{String(draft[key] ?? '—')}</span>
-    if (opts) {
-      return (
-        <select value={String(draft[key] ?? '')} onChange={e => setDraft(d => ({ ...d, [key]: e.target.value }))}
-          className="w-full bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#059669]">
-          {opts.map(o => <option key={o} value={o}>{o}</option>)}
-        </select>
-      )
-    }
-    return (
-      <input type="text" value={String(draft[key] ?? '')} onChange={e => setDraft(d => ({ ...d, [key]: e.target.value }))}
-        className="w-full bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#059669]" />
-    )
-  }
+  const sel = (key: keyof TuitionRecord, opts: string[]) => editing
+    ? <select value={String(draft[key] ?? '')} onChange={e => setDraft(d => ({ ...d, [key]: e.target.value }))}
+        className="w-full bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#059669]">
+        {opts.map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+    : <span>{String(draft[key] ?? '—')}</span>
 
-  const numberInput = (key: keyof TuitionRecord) => {
-    if (!editing) return <span>{String(draft[key] ?? '—')}</span>
-    return (
-      <input type="number" value={Number(draft[key] ?? 0)} onChange={e => setDraft(d => ({ ...d, [key]: parseInt(e.target.value) || 0 }))}
-        className="w-full bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#059669]" />
-    )
-  }
+  const num = (key: keyof TuitionRecord) => editing
+    ? <input type="number" value={Number(draft[key] ?? 0)} onChange={e => setDraft(d => ({ ...d, [key]: parseInt(e.target.value) || 0 }))}
+        className="w-full bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#059669]"/>
+    : <span>{String(draft[key] ?? '—')}</span>
 
-  const subjectsField = () => {
-    if (!editing) return <span>{(draft.subjects || []).join(', ') || '—'}</span>
-    return (
-      <div className="flex flex-wrap gap-1.5">
+  const subjectsEl = () => editing
+    ? <div className="flex flex-wrap gap-1.5">
         {options.subjects.map(s => {
-          const selected = (draft.subjects || []).includes(s)
-          return (
-            <button key={s} type="button"
-              onClick={() => setDraft(d => ({ ...d, subjects: selected ? (d.subjects || []).filter(x => x !== s) : [...(d.subjects || []), s] }))}
-              className={`px-2.5 py-1 text-xs rounded-lg border transition-colors ${selected ? 'bg-[#059669] border-[#059669] text-white' : 'bg-transparent border-[#1E3A8A]/60 text-slate-400 hover:border-slate-400'}`}>
-              {s}
-            </button>
-          )
+          const on = (draft.subjects || []).includes(s)
+          return <button key={s} type="button"
+            onClick={() => setDraft(d => ({ ...d, subjects: on ? d.subjects.filter(x => x !== s) : [...d.subjects, s] }))}
+            className={`px-2.5 py-1 text-xs rounded-lg border transition-colors ${on ? 'bg-[#059669] border-[#059669] text-white' : 'border-[#1E3A8A]/60 text-slate-400 hover:border-slate-400'}`}>
+            {s}
+          </button>
         })}
       </div>
-    )
-  }
+    : <span>{(draft.subjects || []).join(', ') || '—'}</span>
+
+  const daysEl = () => editing
+    ? <div className="flex gap-1.5">{[2,3,4,5,6,7].map(d =>
+        <button key={d} type="button" onClick={() => setDraft(dr => ({ ...dr, days_per_week: d }))}
+          className={`w-9 py-1.5 text-sm rounded-lg border transition-colors ${draft.days_per_week === d ? 'bg-[#059669] border-[#059669] text-white' : 'border-[#1E3A8A]/60 text-slate-400'}`}>{d}</button>)}</div>
+    : <span>{draft.days_per_week}</span>
 
   const handleSave = async () => {
-    setSaving(true)
-    setSaveError('')
+    setSaving(true); setSaveError('')
     try {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { id, created_at, source_version, submitted_from, ...fields } = draft
       await updateRecordFields(record.id, fields)
-      onSaved(draft)
-      setEditing(false)
-    } catch {
-      setSaveError('Save failed. Please try again.')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const statusBadge = (s: string) => {
-    const cfg: Record<string, string> = {
-      approved: 'bg-emerald-900/40 text-emerald-400 border-emerald-700/40',
-      pending: 'bg-amber-900/40 text-amber-400 border-amber-700/40',
-      rejected: 'bg-red-900/40 text-red-400 border-red-700/40',
-    }
-    return <span className={`inline-block px-2.5 py-0.5 text-xs font-semibold rounded-full border ${cfg[s] || ''}`}>{s}</span>
+      onSaved(draft); setEditing(false)
+    } catch { setSaveError('Save failed. Please try again.')
+    } finally { setSaving(false) }
   }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-[#1E293B] border border-[#1E3A8A]/40 rounded-2xl w-full max-w-xl max-h-[90vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
-        {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-[#1E3A8A]/40 sticky top-0 bg-[#1E293B] z-10">
           <div className="flex items-center gap-3">
-            <h2 className="text-white font-semibold text-base">Report Details</h2>
-            {statusBadge(draft.status)}
-            {draft.is_suspicious && (
-              <span className="text-xs text-amber-400 font-semibold">⚠ Suspicious</span>
-            )}
+            <h2 className="text-white font-semibold text-base">Salary Report</h2>
+            <StatusBadge status={draft.status} />
+            {draft.is_suspicious && <span className="text-xs text-amber-400 font-semibold">⚠ Suspicious</span>}
           </div>
           <div className="flex items-center gap-2">
-            {!editing ? (
-              <button onClick={() => setEditing(true)}
-                className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg transition-colors">
-                Edit
-              </button>
-            ) : (
-              <>
-                <button onClick={() => { setEditing(false); setDraft({ ...record }); setSaveError('') }}
-                  className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg transition-colors">
-                  Cancel
-                </button>
-                <button onClick={handleSave} disabled={saving}
-                  className="px-3 py-1.5 bg-[#059669] hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors">
-                  {saving ? 'Saving...' : 'Save'}
-                </button>
-              </>
-            )}
+            {!editing
+              ? <button onClick={() => setEditing(true)} className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg transition-colors">Edit</button>
+              : <>
+                  <button onClick={() => { setEditing(false); setDraft({ ...record }); setSaveError('') }} className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg transition-colors">Cancel</button>
+                  <button onClick={handleSave} disabled={saving} className="px-3 py-1.5 bg-[#059669] hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors">{saving ? 'Saving...' : 'Save'}</button>
+                </>
+            }
             <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
-              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                <path d="M1 1l12 12M13 1L1 13" />
-              </svg>
+              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M1 1l12 12M13 1L1 13"/></svg>
             </button>
           </div>
         </div>
-
-        {/* Body */}
-        <div className="px-6 py-4 space-y-0">
+        <div className="px-6 py-4">
           {saveError && <p className="text-red-400 text-xs mb-3 bg-red-950/40 border border-red-900/40 rounded-lg px-3 py-2">{saveError}</p>}
-          {field('Monthly Salary', editing ? numberInput('salary') : <span className="text-xl font-bold text-[#059669]">{formatBDT(draft.salary)}</span>)}
-          {field('Area', editing
+          {F('Monthly Salary', editing ? num('salary') : <span className="text-xl font-bold text-[#059669]">{formatBDT(draft.salary)}</span>)}
+          {F('Area', editing
             ? <select value={draft.area} onChange={e => setDraft(d => ({ ...d, area: e.target.value }))}
                 className="w-full bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#059669]">
                 {options.areas.map(o => <option key={o} value={o}>{o}</option>)}
               </select>
-            : textInput('area'))}
-          {field('Curriculum', textInput('curriculum', [...CURRICULUMS]))}
-          {field('Student Level', textInput('student_level', [...STUDENT_LEVELS]))}
-          {field('Subjects', subjectsField())}
-          {field('Days per Week', editing
-            ? <div className="flex gap-1.5">{[2,3,4,5,6,7].map(d =>
-                <button key={d} type="button" onClick={() => setDraft(dr => ({ ...dr, days_per_week: d }))}
-                  className={`w-9 py-1.5 text-sm rounded-lg border transition-colors ${draft.days_per_week === d ? 'bg-[#059669] border-[#059669] text-white' : 'border-[#1E3A8A]/60 text-slate-400'}`}>{d}</button>)}</div>
-            : textInput('days_per_week'))}
-          {field('Hours per Session', textInput('hours_per_session', [...HOURS_PER_SESSION]))}
-          {field('University', editing
+            : <span>{draft.area}</span>)}
+          {F('Curriculum', sel('curriculum', [...CURRICULUMS]))}
+          {F('Student Level', sel('student_level', [...STUDENT_LEVELS]))}
+          {F('Subjects', subjectsEl())}
+          {F('Days per Week', daysEl())}
+          {F('Hours per Session', sel('hours_per_session', [...HOURS_PER_SESSION]))}
+          {F('University', editing
             ? <select value={draft.university} onChange={e => setDraft(d => ({ ...d, university: e.target.value }))}
                 className="w-full bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#059669]">
                 {options.universities.map(o => <option key={o} value={o}>{o}</option>)}
               </select>
-            : textInput('university'))}
-          {field('Department', editing
+            : <span>{draft.university}</span>)}
+          {F('Department', editing
             ? <select value={draft.department} onChange={e => setDraft(d => ({ ...d, department: e.target.value }))}
                 className="w-full bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#059669]">
                 {options.departments.map(o => <option key={o} value={o}>{o}</option>)}
               </select>
-            : textInput('department'))}
-          {field('Academic Year', textInput('academic_year', [...ACADEMIC_YEARS]))}
-          {field('Status', editing
+            : <span>{draft.department}</span>)}
+          {F('Academic Year', sel('academic_year', [...ACADEMIC_YEARS]))}
+          {F('Status', editing
             ? <select value={draft.status} onChange={e => setDraft(d => ({ ...d, status: e.target.value as TuitionRecord['status'] }))}
                 className="w-full bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#059669]">
                 <option value="pending">pending</option>
                 <option value="approved">approved</option>
                 <option value="rejected">rejected</option>
               </select>
-            : statusBadge(draft.status))}
-          {field('Submitted', <span>{formatDate(draft.created_at)}</span>)}
-          {field('Source', <span className="text-slate-400">{draft.source_version} · {draft.submitted_from}</span>)}
+            : <StatusBadge status={draft.status} />)}
+          {F('Submitted', <span>{formatDate(draft.created_at)}</span>)}
+          {F('Source', <span className="text-slate-400">{draft.source_version} · {draft.submitted_from}</span>)}
         </div>
       </div>
     </div>
   )
 }
 
-// ─── Stat Card ─────────────────────────────────────────────────────────────────
+// ─── Pending Item Modal (view + edit for areas/subjects/universities/depts) ───
+
+function PendingItemModal({
+  item, collectionKey, onClose, onSaved,
+}: {
+  item: PendingItemDoc
+  collectionKey: string   // 'areas' | 'subjects' | 'universities' | 'departments'
+  onClose: () => void
+  onSaved: (updated: PendingItemDoc) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const [draft, setDraft] = useState<PendingItemDoc>({ ...item })
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [onClose])
+
+  const collectionName = PENDING_COLLECTIONS[collectionKey]
+  const typeLabel = collectionKey.slice(0, -1) // 'areas' → 'area'
+
+  const handleSave = async () => {
+    if (!draft.value.trim()) { setSaveError('Value cannot be empty.'); return }
+    setSaving(true); setSaveError('')
+    try {
+      await updatePendingItem(collectionName, item.id, { value: draft.value.trim(), status: draft.status })
+      onSaved(draft); setEditing(false)
+    } catch { setSaveError('Save failed. Please try again.')
+    } finally { setSaving(false) }
+  }
+
+  const F = (label: string, content: React.ReactNode) => (
+    <div className="py-2.5 border-b border-[#1E3A8A]/30 last:border-0">
+      <p className="text-slate-500 text-xs uppercase tracking-wide mb-1 font-medium">{label}</p>
+      <div className="text-white text-sm">{content}</div>
+    </div>
+  )
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-[#1E293B] border border-[#1E3A8A]/40 rounded-2xl w-full max-w-md shadow-2xl" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-[#1E3A8A]/40">
+          <div className="flex items-center gap-3">
+            <h2 className="text-white font-semibold text-base capitalize">{typeLabel} Entry</h2>
+            <StatusBadge status={draft.status} />
+          </div>
+          <div className="flex items-center gap-2">
+            {!editing
+              ? <button onClick={() => setEditing(true)} className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg transition-colors">Edit</button>
+              : <>
+                  <button onClick={() => { setEditing(false); setDraft({ ...item }); setSaveError('') }} className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg transition-colors">Cancel</button>
+                  <button onClick={handleSave} disabled={saving} className="px-3 py-1.5 bg-[#059669] hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors">{saving ? 'Saving...' : 'Save'}</button>
+                </>
+            }
+            <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
+              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M1 1l12 12M13 1L1 13"/></svg>
+            </button>
+          </div>
+        </div>
+        <div className="px-6 py-4">
+          {saveError && <p className="text-red-400 text-xs mb-3 bg-red-950/40 border border-red-900/40 rounded-lg px-3 py-2">{saveError}</p>}
+          {F('Value', editing
+            ? <input type="text" value={draft.value} onChange={e => setDraft(d => ({ ...d, value: e.target.value }))}
+                className="w-full bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#059669]"/>
+            : <span className="font-medium">{draft.value}</span>)}
+          {F('Status', editing
+            ? <select value={draft.status} onChange={e => setDraft(d => ({ ...d, status: e.target.value as PendingItemDoc['status'] }))}
+                className="w-full bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#059669]">
+                <option value="pending">pending</option>
+                <option value="approved">approved</option>
+                <option value="rejected">rejected</option>
+              </select>
+            : <StatusBadge status={draft.status} />)}
+          {F('Submitted', <span>{formatDate(draft.submitted_at)}</span>)}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Stat Card ────────────────────────────────────────────────────────────────
 
 function AdminStatCard({ label, value }: { label: string; value: string }) {
   return (
@@ -280,11 +335,12 @@ function AdminStatCard({ label, value }: { label: string; value: string }) {
   )
 }
 
-// ─── Queue Panel ───────────────────────────────────────────────────────────────
+// ─── Queue Panel (moderation tab) ─────────────────────────────────────────────
 
 function QueuePanel({
   title, queueType, items, loading, processing, bulkProcessing,
-  onApprove, onReject, onApproveAll, onRejectAll, onRefresh, onViewRecord, options,
+  onApprove, onReject, onApproveAll, onRejectAll, onRefresh,
+  onViewRecord, onViewPendingItem,
 }: {
   title: string
   queueType: string
@@ -297,10 +353,11 @@ function QueuePanel({
   onApproveAll: (type: string) => void
   onRejectAll: (type: string) => void
   onRefresh: (type: string) => void
-  onViewRecord: (record: TuitionRecord & { id: string }) => void
-  options: ApprovedOptions
+  onViewRecord: (r: TuitionRecord & { id: string }) => void
+  onViewPendingItem: (item: PendingItemDoc, collectionKey: string) => void
 }) {
   const isBulkBusy = bulkProcessing === queueType
+  const isRecord = queueType === 'records'
 
   return (
     <div className="bg-[#1E293B] border border-[#1E3A8A]/40 rounded-2xl overflow-hidden">
@@ -309,9 +366,7 @@ function QueuePanel({
           <div className="flex items-center gap-2">
             <h3 className="text-white font-semibold text-sm">{title}</h3>
             {items.length > 0 && (
-              <span className="inline-flex items-center justify-center min-w-5 h-5 px-1.5 bg-amber-500 text-white text-xs font-bold rounded-full">
-                {items.length}
-              </span>
+              <span className="inline-flex items-center justify-center min-w-5 h-5 px-1.5 bg-amber-500 text-white text-xs font-bold rounded-full">{items.length}</span>
             )}
           </div>
           <button onClick={() => onRefresh(queueType)} disabled={loading}
@@ -323,7 +378,9 @@ function QueuePanel({
           <div className="flex gap-2">
             <button onClick={() => onApproveAll(queueType)} disabled={isBulkBusy || !!processing}
               className="flex-1 py-2 bg-[#059669]/20 hover:bg-[#059669]/30 border border-[#059669]/40 text-[#059669] text-xs font-semibold rounded-lg transition-colors disabled:opacity-40">
-              {isBulkBusy ? <span className="flex items-center justify-center gap-1.5"><svg className="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>Processing...</span> : `✓ Approve All (${items.length})`}
+              {isBulkBusy
+                ? <span className="flex items-center justify-center gap-1.5"><svg className="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>Processing...</span>
+                : `✓ Approve All (${items.length})`}
             </button>
             <button onClick={() => onRejectAll(queueType)} disabled={isBulkBusy || !!processing}
               className="flex-1 py-2 bg-red-950/30 hover:bg-red-950/50 border border-red-900/40 text-red-400 text-xs font-semibold rounded-lg transition-colors disabled:opacity-40">
@@ -350,11 +407,16 @@ function QueuePanel({
               <div key={item.id}
                 className={`px-5 py-4 transition-opacity ${isItemBusy ? 'opacity-40' : ''} ${suspicious ? 'bg-amber-950/30 border-l-2 border-amber-500' : ''}`}>
                 <div className="flex items-start justify-between gap-3">
-                  {/* Clickable detail area — FIX #3 */}
-                  <button className="flex-1 min-w-0 text-left" onClick={() => !customValue && onViewRecord(item)}>
+                  <button className="flex-1 min-w-0 text-left"
+                    onClick={() => isRecord
+                      ? onViewRecord(item)
+                      : onViewPendingItem(item as unknown as PendingItemDoc, queueType)}>
                     {suspicious && <span className="inline-block text-xs text-amber-400 font-semibold mb-1.5">⚠ Suspicious</span>}
                     {customValue ? (
-                      <p className="text-white text-sm font-medium">{customValue}</p>
+                      <p className="text-white text-sm font-medium hover:text-[#059669] transition-colors">
+                        {customValue}
+                        <span className="ml-2 text-[10px] text-slate-500 font-normal">tap to edit</span>
+                      </p>
                     ) : (
                       <div className="space-y-0.5">
                         <p className="text-white text-sm font-semibold hover:text-[#059669] transition-colors">
@@ -390,74 +452,89 @@ function QueuePanel({
   )
 }
 
-// ─── All Records Panel (FIX #6) ───────────────────────────────────────────────
+// ─── All Items Panel — generic for all 5 types ───────────────────────────────
 
-function AllRecordsPanel({
+type AllPanelType = 'records' | 'areas' | 'subjects' | 'universities' | 'departments'
+
+const ALL_PANEL_CONFIG: Record<AllPanelType, { title: string; isRecord: boolean; collectionName: string }> = {
+  records:     { title: 'Salary Reports',  isRecord: true,  collectionName: 'tuition_records' },
+  areas:       { title: 'All Areas',        isRecord: false, collectionName: 'pending_areas' },
+  subjects:    { title: 'All Subjects',     isRecord: false, collectionName: 'pending_subjects' },
+  universities:{ title: 'All Universities', isRecord: false, collectionName: 'pending_universities' },
+  departments: { title: 'All Departments',  isRecord: false, collectionName: 'pending_departments' },
+}
+
+function AllItemsPanel({
+  panelType,
   onViewRecord,
+  onViewPendingItem,
 }: {
-  onViewRecord: (record: TuitionRecord & { id: string }) => void
+  panelType: AllPanelType
+  onViewRecord: (r: TuitionRecord & { id: string }) => void
+  onViewPendingItem: (item: PendingItemDoc, collectionKey: string) => void
 }) {
+  const cfg = ALL_PANEL_CONFIG[panelType]
   const [records, setRecords] = useState<Array<TuitionRecord & { id: string }>>([])
+  const [pendingItems, setPendingItems] = useState<PendingItemDoc[]>([])
   const [loading, setLoading] = useState(true)
-  const [filter, setFilter] = useState<'all' | 'approved' | 'pending' | 'rejected'>('all')
+  const [statusFilter, setStatusFilter] = useState<'all' | 'approved' | 'pending' | 'rejected'>('all')
   const [search, setSearch] = useState('')
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const all = await fetchAllRecords()
-      setRecords(all)
-    } catch {
-      // silent
-    } finally {
-      setLoading(false)
-    }
-  }, [])
+      if (cfg.isRecord) {
+        const all = await fetchAllRecords()
+        setRecords(all)
+      } else {
+        const all = await fetchAllPendingItems(cfg.collectionName)
+        setPendingItems(all)
+      }
+    } catch { /* silent */ }
+    finally { setLoading(false) }
+  }, [cfg.isRecord, cfg.collectionName])
 
   useEffect(() => { load() }, [load])
 
-  const filtered = records.filter(r => {
-    if (filter !== 'all' && r.status !== filter) return false
+  // Salary records filtered list
+  const filteredRecords = records.filter(r => {
+    if (statusFilter !== 'all' && r.status !== statusFilter) return false
     if (search.trim()) {
       const q = search.toLowerCase()
-      return (
-        r.area?.toLowerCase().includes(q) ||
-        r.university?.toLowerCase().includes(q) ||
-        r.department?.toLowerCase().includes(q) ||
-        r.student_level?.toLowerCase().includes(q) ||
+      return r.area?.toLowerCase().includes(q) || r.university?.toLowerCase().includes(q) ||
+        r.department?.toLowerCase().includes(q) || r.student_level?.toLowerCase().includes(q) ||
         r.curriculum?.toLowerCase().includes(q)
-      )
     }
     return true
   })
 
-  const statusBadge = (s: string) => {
-    const cfg: Record<string, string> = {
-      approved: 'bg-emerald-900/40 text-emerald-400',
-      pending: 'bg-amber-900/40 text-amber-400',
-      rejected: 'bg-red-900/40 text-red-400',
-    }
-    return <span className={`inline-block px-2 py-0.5 text-xs font-semibold rounded-full ${cfg[s] || ''}`}>{s}</span>
-  }
+  // Pending items filtered list
+  const filteredItems = pendingItems.filter(item => {
+    if (statusFilter !== 'all' && item.status !== statusFilter) return false
+    if (search.trim()) return item.value.toLowerCase().includes(search.toLowerCase())
+    return true
+  })
+
+  const count = cfg.isRecord ? filteredRecords.length : filteredItems.length
 
   return (
     <div className="bg-[#1E293B] border border-[#1E3A8A]/40 rounded-2xl overflow-hidden">
       <div className="px-5 py-4 border-b border-[#1E3A8A]/40">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
-            <h3 className="text-white font-semibold text-sm">All Salary Reports</h3>
-            <span className="text-slate-400 text-xs">({filtered.length} shown)</span>
+            <h3 className="text-white font-semibold text-sm">{cfg.title}</h3>
+            <span className="text-slate-400 text-xs">({count})</span>
           </div>
           <button onClick={load} disabled={loading}
             className="text-xs text-slate-400 hover:text-white transition-colors disabled:opacity-50">
             {loading ? 'Loading...' : '↻ Refresh'}
           </button>
         </div>
-        {/* Search + status filter */}
         <div className="flex gap-2">
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search area, university, level..."
-            className="flex-1 px-3 py-1.5 bg-[#0F172A] border border-[#1E3A8A]/40 rounded-lg text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-[#059669]" />
-          <select value={filter} onChange={e => setFilter(e.target.value as typeof filter)}
+          <input value={search} onChange={e => setSearch(e.target.value)}
+            placeholder={cfg.isRecord ? 'Search area, university, level...' : 'Search value...'}
+            className="flex-1 px-3 py-1.5 bg-[#0F172A] border border-[#1E3A8A]/40 rounded-lg text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-[#059669]"/>
+          <select value={statusFilter} onChange={e => setStatusFilter(e.target.value as typeof statusFilter)}
             className="px-3 py-1.5 bg-[#0F172A] border border-[#1E3A8A]/40 rounded-lg text-sm text-white focus:outline-none focus:border-[#059669]">
             <option value="all">All</option>
             <option value="approved">Approved</option>
@@ -468,12 +545,13 @@ function AllRecordsPanel({
       </div>
 
       {loading ? (
-        <div className="px-5 py-8 text-center text-slate-500 text-sm">Loading all records...</div>
-      ) : filtered.length === 0 ? (
+        <div className="px-5 py-8 text-center text-slate-500 text-sm">Loading...</div>
+      ) : count === 0 ? (
         <div className="px-5 py-8 text-center text-slate-500 text-sm">No records found</div>
-      ) : (
-        <div className="divide-y divide-[#1E3A8A]/30 max-h-[600px] overflow-y-auto">
-          {filtered.map(r => (
+      ) : cfg.isRecord ? (
+        // Salary records list
+        <div className="divide-y divide-[#1E3A8A]/30 max-h-[480px] overflow-y-auto">
+          {filteredRecords.map(r => (
             <button key={r.id} onClick={() => onViewRecord(r)}
               className="w-full px-5 py-3.5 text-left hover:bg-white/5 transition-colors group">
               <div className="flex items-center justify-between gap-3">
@@ -482,19 +560,34 @@ function AllRecordsPanel({
                     <span className="text-white text-sm font-semibold group-hover:text-[#059669] transition-colors">
                       {formatBDT(r.salary)}/mo
                     </span>
-                    {statusBadge(r.status)}
+                    <StatusBadge status={r.status} />
                     {r.is_suspicious && <span className="text-xs text-amber-400 font-semibold">⚠</span>}
                   </div>
-                  <p className="text-slate-400 text-xs truncate">
-                    {r.area} · {r.student_level} · {r.curriculum}
-                  </p>
-                  <p className="text-slate-500 text-xs truncate">
-                    {r.university} — {r.department} · {formatDate(r.created_at)}
-                  </p>
+                  <p className="text-slate-400 text-xs truncate">{r.area} · {r.student_level} · {r.curriculum}</p>
+                  <p className="text-slate-500 text-xs truncate">{r.university} — {r.department} · {formatDate(r.created_at)}</p>
                 </div>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#475569" strokeWidth="2" className="flex-shrink-0 group-hover:stroke-[#059669] transition-colors">
-                  <path d="M9 18l6-6-6-6"/>
-                </svg>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#475569" strokeWidth="2" className="flex-shrink-0 group-hover:stroke-[#059669] transition-colors"><path d="M9 18l6-6-6-6"/></svg>
+              </div>
+            </button>
+          ))}
+        </div>
+      ) : (
+        // Pending items list (areas/subjects/universities/departments)
+        <div className="divide-y divide-[#1E3A8A]/30 max-h-[480px] overflow-y-auto">
+          {filteredItems.map(item => (
+            <button key={item.id} onClick={() => onViewPendingItem(item, panelType)}
+              className="w-full px-5 py-3.5 text-left hover:bg-white/5 transition-colors group">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-white text-sm font-medium group-hover:text-[#059669] transition-colors">
+                      {item.value}
+                    </span>
+                    <StatusBadge status={item.status} />
+                  </div>
+                  <p className="text-slate-500 text-xs mt-0.5">{formatDate(item.submitted_at)}</p>
+                </div>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#475569" strokeWidth="2" className="flex-shrink-0 group-hover:stroke-[#059669] transition-colors"><path d="M9 18l6-6-6-6"/></svg>
               </div>
             </button>
           ))}
@@ -512,8 +605,11 @@ function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () 
   const { items, loading, processing, bulkProcessing, approve, reject, approveAll, rejectAll, refresh, refreshAll } = useAdminQueue()
   const [adminStats, setAdminStats] = useState<AdminStats | null>(null)
   const [activeTab, setActiveTab] = useState<AdminTab>('queues')
-  const [selectedRecord, setSelectedRecord] = useState<(TuitionRecord & { id: string }) | null>(null)
   const [options, setOptions] = useState<ApprovedOptions>({ areas: [], subjects: [], universities: [], departments: [] })
+
+  // Modal state — either a salary record or a pending item
+  const [selectedRecord, setSelectedRecord] = useState<(TuitionRecord & { id: string }) | null>(null)
+  const [selectedPendingItem, setSelectedPendingItem] = useState<{ item: PendingItemDoc; collectionKey: string } | null>(null)
 
   useEffect(() => {
     refreshAll()
@@ -523,19 +619,27 @@ function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () 
 
   const totalPending = Object.values(items).reduce((sum, arr) => sum + arr.length, 0)
 
-  const queuePanels = [
-    { title: 'Salary Reports', queueType: 'records' },
-    { title: 'New Areas', queueType: 'areas' },
-    { title: 'New Subjects', queueType: 'subjects' },
+  const queuePanels: { title: string; queueType: string }[] = [
+    { title: 'Salary Reports',  queueType: 'records' },
+    { title: 'New Areas',        queueType: 'areas' },
+    { title: 'New Subjects',     queueType: 'subjects' },
     { title: 'New Universities', queueType: 'universities' },
-    { title: 'New Departments', queueType: 'departments' },
+    { title: 'New Departments',  queueType: 'departments' },
   ]
 
-  // When a record is saved from the modal, update it in-place in the queue list
+  const allPanels: AllPanelType[] = ['records', 'areas', 'subjects', 'universities', 'departments']
+
+  const handleViewPendingItem = useCallback((item: PendingItemDoc, collectionKey: string) => {
+    setSelectedPendingItem({ item, collectionKey })
+  }, [])
+
   const handleRecordSaved = useCallback((updated: TuitionRecord & { id: string }) => {
     setSelectedRecord(updated)
-    // Refresh stats
     fetchAdminStats().then(setAdminStats).catch(() => {})
+  }, [])
+
+  const handlePendingItemSaved = useCallback((updated: PendingItemDoc) => {
+    setSelectedPendingItem(prev => prev ? { ...prev, item: updated } : null)
   }, [])
 
   return (
@@ -553,40 +657,41 @@ function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () 
           </h1>
           <p className="text-slate-400 text-sm mt-0.5">{userEmail}</p>
         </div>
-        <button onClick={onSignOut}
-          className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white text-sm font-medium rounded-lg transition-colors">
+        <button onClick={onSignOut} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white text-sm font-medium rounded-lg transition-colors">
           Sign Out
         </button>
       </div>
 
-      {/* Stats grid */}
+      {/* Stats */}
       {adminStats && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8">
-          <AdminStatCard label="Total Reports" value={adminStats.total_reports.toString()} />
-          <AdminStatCard label="Approved" value={adminStats.approved_reports.toString()} />
-          <AdminStatCard label="Pending" value={adminStats.pending_reports.toString()} />
-          <AdminStatCard label="Rejected" value={adminStats.rejected_reports.toString()} />
-          <AdminStatCard label="Areas" value={adminStats.areas_covered.toString()} />
-          <AdminStatCard label="Universities" value={adminStats.universities_covered.toString()} />
-          <AdminStatCard label="Subjects" value={adminStats.subjects_covered.toString()} />
-          <AdminStatCard label="Median Salary" value={formatBDT(adminStats.median_salary)} />
+          <AdminStatCard label="Total Reports"   value={adminStats.total_reports.toString()} />
+          <AdminStatCard label="Approved"         value={adminStats.approved_reports.toString()} />
+          <AdminStatCard label="Pending"          value={adminStats.pending_reports.toString()} />
+          <AdminStatCard label="Rejected"         value={adminStats.rejected_reports.toString()} />
+          <AdminStatCard label="Areas"            value={adminStats.areas_covered.toString()} />
+          <AdminStatCard label="Universities"     value={adminStats.universities_covered.toString()} />
+          <AdminStatCard label="Subjects"         value={adminStats.subjects_covered.toString()} />
+          <AdminStatCard label="Median Salary"    value={formatBDT(adminStats.median_salary)} />
         </div>
       )}
 
-      {/* Tabs — FIX #6 */}
+      {/* Tab switcher */}
       <div className="flex gap-1 mb-6 bg-[#1E293B] border border-[#1E3A8A]/40 rounded-xl p-1 w-fit">
         <button onClick={() => setActiveTab('queues')}
           className={`px-5 py-2 text-sm font-semibold rounded-lg transition-colors ${activeTab === 'queues' ? 'bg-[#059669] text-white' : 'text-slate-400 hover:text-white'}`}>
           Moderation Queues
-          {totalPending > 0 && <span className="ml-2 inline-flex items-center justify-center w-4 h-4 bg-amber-500 text-white text-xs font-bold rounded-full">{totalPending}</span>}
+          {totalPending > 0 && (
+            <span className="ml-2 inline-flex items-center justify-center w-4 h-4 bg-amber-500 text-white text-xs font-bold rounded-full">{totalPending}</span>
+          )}
         </button>
         <button onClick={() => setActiveTab('all-records')}
           className={`px-5 py-2 text-sm font-semibold rounded-lg transition-colors ${activeTab === 'all-records' ? 'bg-[#059669] text-white' : 'text-slate-400 hover:text-white'}`}>
-          All Reports
+          All Records
         </button>
       </div>
 
-      {/* Moderation Queues tab */}
+      {/* Moderation Queues tab — 5 panels */}
       {activeTab === 'queues' && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
           {queuePanels.map(({ title, queueType }) => (
@@ -604,24 +709,43 @@ function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () 
               onRejectAll={rejectAll}
               onRefresh={refresh}
               onViewRecord={setSelectedRecord}
-              options={options}
+              onViewPendingItem={handleViewPendingItem}
             />
           ))}
         </div>
       )}
 
-      {/* All Records tab — FIX #6 */}
+      {/* All Records tab — 5 panels */}
       {activeTab === 'all-records' && (
-        <AllRecordsPanel onViewRecord={setSelectedRecord} />
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+          {allPanels.map(pt => (
+            <AllItemsPanel
+              key={pt}
+              panelType={pt}
+              onViewRecord={setSelectedRecord}
+              onViewPendingItem={handleViewPendingItem}
+            />
+          ))}
+        </div>
       )}
 
-      {/* Record detail modal — FIX #3 + #5 */}
+      {/* Salary record modal */}
       {selectedRecord && (
         <RecordModal
           record={selectedRecord}
           options={options}
           onClose={() => setSelectedRecord(null)}
           onSaved={handleRecordSaved}
+        />
+      )}
+
+      {/* Pending item modal */}
+      {selectedPendingItem && (
+        <PendingItemModal
+          item={selectedPendingItem.item}
+          collectionKey={selectedPendingItem.collectionKey}
+          onClose={() => setSelectedPendingItem(null)}
+          onSaved={handlePendingItemSaved}
         />
       )}
     </div>
@@ -641,7 +765,7 @@ export default function AdminPage() {
         const { onAuthStateChanged } = await import('firebase/auth')
         const { getAuthInstance } = await import('../../lib/firebase/config')
         const auth = await getAuthInstance()
-        unsubscribe = onAuthStateChanged(auth, (u) => {
+        unsubscribe = onAuthStateChanged(auth, u => {
           setUser(u ? { email: u.email || '' } : null)
           setChecking(false)
         })
