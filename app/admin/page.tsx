@@ -5,9 +5,21 @@ export const dynamic = 'force-dynamic'
 import { useState, useEffect, useCallback } from 'react'
 import { useAdminQueue } from '../../hooks/useAdminQueue'
 import { getAuthErrorMessage } from '../../lib/errors'
-import { formatBDT, fetchAdminStats } from '../../lib/benchmark'
+import { formatBDT, fetchAdminStats, fetchAllRecords, updateRecordFields, fetchApprovedOptions } from '../../lib/benchmark'
 import { trackAdminLogin, trackAdminLogout } from '../../lib/analytics'
-import type { AdminStats, TuitionRecord } from '../../lib/types'
+import { STUDENT_LEVELS, CURRICULUMS, ACADEMIC_YEARS, HOURS_PER_SESSION } from '../../lib/data'
+import type { AdminStats, TuitionRecord, ApprovedOptions } from '../../lib/types'
+import { Timestamp } from 'firebase/firestore'
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function formatDate(ts: unknown): string {
+  if (!ts) return '—'
+  try {
+    const d = ts instanceof Timestamp ? ts.toDate() : new Date(ts as string)
+    return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+  } catch { return '—' }
+}
 
 // ─── Login Screen ──────────────────────────────────────────────────────────────
 
@@ -49,40 +61,208 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
           <h1 className="text-white font-bold text-xl">Admin Panel</h1>
           <p className="text-slate-400 text-sm mt-1">TuitionMeter</p>
         </div>
-
         <div className="space-y-4">
           <div>
             <label className="block text-xs text-slate-400 mb-1.5">Email</label>
-            <input
-              type="email"
-              value={email}
-              onChange={e => setEmail(e.target.value)}
-              placeholder="admin@example.com"
-              onKeyDown={e => e.key === 'Enter' && handleLogin()}
-              className="w-full px-3.5 py-2.5 bg-[#0F172A] border border-[#1E3A8A]/40 rounded-lg text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-[#059669] focus:ring-2 focus:ring-emerald-900"
-            />
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)}
+              placeholder="admin@example.com" onKeyDown={e => e.key === 'Enter' && handleLogin()}
+              className="w-full px-3.5 py-2.5 bg-[#0F172A] border border-[#1E3A8A]/40 rounded-lg text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-[#059669] focus:ring-2 focus:ring-emerald-900" />
           </div>
           <div>
             <label className="block text-xs text-slate-400 mb-1.5">Password</label>
-            <input
-              type="password"
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && handleLogin()}
-              placeholder="••••••••"
-              className="w-full px-3.5 py-2.5 bg-[#0F172A] border border-[#1E3A8A]/40 rounded-lg text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-[#059669] focus:ring-2 focus:ring-emerald-900"
-            />
+            <input type="password" value={password} onChange={e => setPassword(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleLogin()} placeholder="••••••••"
+              className="w-full px-3.5 py-2.5 bg-[#0F172A] border border-[#1E3A8A]/40 rounded-lg text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-[#059669] focus:ring-2 focus:ring-emerald-900" />
           </div>
-          {error && (
-            <p className="text-red-400 text-xs bg-red-950/40 border border-red-900/40 rounded-lg px-3 py-2">{error}</p>
-          )}
-          <button
-            onClick={handleLogin}
-            disabled={loading}
-            className="w-full py-3 bg-[#059669] hover:bg-emerald-500 disabled:opacity-60 text-white font-semibold text-sm rounded-xl transition-colors"
-          >
+          {error && <p className="text-red-400 text-xs bg-red-950/40 border border-red-900/40 rounded-lg px-3 py-2">{error}</p>}
+          <button onClick={handleLogin} disabled={loading}
+            className="w-full py-3 bg-[#059669] hover:bg-emerald-500 disabled:opacity-60 text-white font-semibold text-sm rounded-xl transition-colors">
             {loading ? 'Signing in...' : 'Sign In'}
           </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Record Detail Modal (view + edit) ────────────────────────────────────────
+
+function RecordModal({
+  record,
+  options,
+  onClose,
+  onSaved,
+}: {
+  record: TuitionRecord & { id: string }
+  options: ApprovedOptions
+  onClose: () => void
+  onSaved: (updated: TuitionRecord & { id: string }) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const [draft, setDraft] = useState<TuitionRecord & { id: string }>({ ...record })
+
+  // Close on Escape
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [onClose])
+
+  const field = (label: string, content: React.ReactNode) => (
+    <div className="py-2.5 border-b border-[#1E3A8A]/30 last:border-0">
+      <p className="text-slate-500 text-xs uppercase tracking-wide mb-1 font-medium">{label}</p>
+      <div className="text-white text-sm">{content}</div>
+    </div>
+  )
+
+  const textInput = (key: keyof TuitionRecord, opts?: string[]) => {
+    if (!editing) return <span>{String(draft[key] ?? '—')}</span>
+    if (opts) {
+      return (
+        <select value={String(draft[key] ?? '')} onChange={e => setDraft(d => ({ ...d, [key]: e.target.value }))}
+          className="w-full bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#059669]">
+          {opts.map(o => <option key={o} value={o}>{o}</option>)}
+        </select>
+      )
+    }
+    return (
+      <input type="text" value={String(draft[key] ?? '')} onChange={e => setDraft(d => ({ ...d, [key]: e.target.value }))}
+        className="w-full bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#059669]" />
+    )
+  }
+
+  const numberInput = (key: keyof TuitionRecord) => {
+    if (!editing) return <span>{String(draft[key] ?? '—')}</span>
+    return (
+      <input type="number" value={Number(draft[key] ?? 0)} onChange={e => setDraft(d => ({ ...d, [key]: parseInt(e.target.value) || 0 }))}
+        className="w-full bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#059669]" />
+    )
+  }
+
+  const subjectsField = () => {
+    if (!editing) return <span>{(draft.subjects || []).join(', ') || '—'}</span>
+    return (
+      <div className="flex flex-wrap gap-1.5">
+        {options.subjects.map(s => {
+          const selected = (draft.subjects || []).includes(s)
+          return (
+            <button key={s} type="button"
+              onClick={() => setDraft(d => ({ ...d, subjects: selected ? (d.subjects || []).filter(x => x !== s) : [...(d.subjects || []), s] }))}
+              className={`px-2.5 py-1 text-xs rounded-lg border transition-colors ${selected ? 'bg-[#059669] border-[#059669] text-white' : 'bg-transparent border-[#1E3A8A]/60 text-slate-400 hover:border-slate-400'}`}>
+              {s}
+            </button>
+          )
+        })}
+      </div>
+    )
+  }
+
+  const handleSave = async () => {
+    setSaving(true)
+    setSaveError('')
+    try {
+      const { id, created_at, source_version, submitted_from, ...fields } = draft
+      await updateRecordFields(record.id, fields)
+      onSaved(draft)
+      setEditing(false)
+    } catch {
+      setSaveError('Save failed. Please try again.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const statusBadge = (s: string) => {
+    const cfg: Record<string, string> = {
+      approved: 'bg-emerald-900/40 text-emerald-400 border-emerald-700/40',
+      pending: 'bg-amber-900/40 text-amber-400 border-amber-700/40',
+      rejected: 'bg-red-900/40 text-red-400 border-red-700/40',
+    }
+    return <span className={`inline-block px-2.5 py-0.5 text-xs font-semibold rounded-full border ${cfg[s] || ''}`}>{s}</span>
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-[#1E293B] border border-[#1E3A8A]/40 rounded-2xl w-full max-w-xl max-h-[90vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-[#1E3A8A]/40 sticky top-0 bg-[#1E293B] z-10">
+          <div className="flex items-center gap-3">
+            <h2 className="text-white font-semibold text-base">Report Details</h2>
+            {statusBadge(draft.status)}
+            {draft.is_suspicious && (
+              <span className="text-xs text-amber-400 font-semibold">⚠ Suspicious</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {!editing ? (
+              <button onClick={() => setEditing(true)}
+                className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg transition-colors">
+                Edit
+              </button>
+            ) : (
+              <>
+                <button onClick={() => { setEditing(false); setDraft({ ...record }); setSaveError('') }}
+                  className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg transition-colors">
+                  Cancel
+                </button>
+                <button onClick={handleSave} disabled={saving}
+                  className="px-3 py-1.5 bg-[#059669] hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors">
+                  {saving ? 'Saving...' : 'Save'}
+                </button>
+              </>
+            )}
+            <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">
+              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <path d="M1 1l12 12M13 1L1 13" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="px-6 py-4 space-y-0">
+          {saveError && <p className="text-red-400 text-xs mb-3 bg-red-950/40 border border-red-900/40 rounded-lg px-3 py-2">{saveError}</p>}
+          {field('Monthly Salary', editing ? numberInput('salary') : <span className="text-xl font-bold text-[#059669]">{formatBDT(draft.salary)}</span>)}
+          {field('Area', editing
+            ? <select value={draft.area} onChange={e => setDraft(d => ({ ...d, area: e.target.value }))}
+                className="w-full bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#059669]">
+                {options.areas.map(o => <option key={o} value={o}>{o}</option>)}
+              </select>
+            : textInput('area'))}
+          {field('Curriculum', textInput('curriculum', [...CURRICULUMS]))}
+          {field('Student Level', textInput('student_level', [...STUDENT_LEVELS]))}
+          {field('Subjects', subjectsField())}
+          {field('Days per Week', editing
+            ? <div className="flex gap-1.5">{[2,3,4,5,6,7].map(d =>
+                <button key={d} type="button" onClick={() => setDraft(dr => ({ ...dr, days_per_week: d }))}
+                  className={`w-9 py-1.5 text-sm rounded-lg border transition-colors ${draft.days_per_week === d ? 'bg-[#059669] border-[#059669] text-white' : 'border-[#1E3A8A]/60 text-slate-400'}`}>{d}</button>)}</div>
+            : textInput('days_per_week'))}
+          {field('Hours per Session', textInput('hours_per_session', [...HOURS_PER_SESSION]))}
+          {field('University', editing
+            ? <select value={draft.university} onChange={e => setDraft(d => ({ ...d, university: e.target.value }))}
+                className="w-full bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#059669]">
+                {options.universities.map(o => <option key={o} value={o}>{o}</option>)}
+              </select>
+            : textInput('university'))}
+          {field('Department', editing
+            ? <select value={draft.department} onChange={e => setDraft(d => ({ ...d, department: e.target.value }))}
+                className="w-full bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#059669]">
+                {options.departments.map(o => <option key={o} value={o}>{o}</option>)}
+              </select>
+            : textInput('department'))}
+          {field('Academic Year', textInput('academic_year', [...ACADEMIC_YEARS]))}
+          {field('Status', editing
+            ? <select value={draft.status} onChange={e => setDraft(d => ({ ...d, status: e.target.value as TuitionRecord['status'] }))}
+                className="w-full bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-[#059669]">
+                <option value="pending">pending</option>
+                <option value="approved">approved</option>
+                <option value="rejected">rejected</option>
+              </select>
+            : statusBadge(draft.status))}
+          {field('Submitted', <span>{formatDate(draft.created_at)}</span>)}
+          {field('Source', <span className="text-slate-400">{draft.source_version} · {draft.submitted_from}</span>)}
         </div>
       </div>
     </div>
@@ -103,17 +283,8 @@ function AdminStatCard({ label, value }: { label: string; value: string }) {
 // ─── Queue Panel ───────────────────────────────────────────────────────────────
 
 function QueuePanel({
-  title,
-  queueType,
-  items,
-  loading,
-  processing,
-  bulkProcessing,
-  onApprove,
-  onReject,
-  onApproveAll,
-  onRejectAll,
-  onRefresh,
+  title, queueType, items, loading, processing, bulkProcessing,
+  onApprove, onReject, onApproveAll, onRejectAll, onRefresh, onViewRecord, options,
 }: {
   title: string
   queueType: string
@@ -126,12 +297,13 @@ function QueuePanel({
   onApproveAll: (type: string) => void
   onRejectAll: (type: string) => void
   onRefresh: (type: string) => void
+  onViewRecord: (record: TuitionRecord & { id: string }) => void
+  options: ApprovedOptions
 }) {
   const isBulkBusy = bulkProcessing === queueType
 
   return (
     <div className="bg-[#1E293B] border border-[#1E3A8A]/40 rounded-2xl overflow-hidden">
-      {/* Header */}
       <div className="px-5 py-4 border-b border-[#1E3A8A]/40">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
@@ -142,76 +314,52 @@ function QueuePanel({
               </span>
             )}
           </div>
-          <button
-            onClick={() => onRefresh(queueType)}
-            disabled={loading}
-            className="text-xs text-slate-400 hover:text-white transition-colors disabled:opacity-50"
-          >
+          <button onClick={() => onRefresh(queueType)} disabled={loading}
+            className="text-xs text-slate-400 hover:text-white transition-colors disabled:opacity-50">
             {loading ? 'Loading...' : '↻ Refresh'}
           </button>
         </div>
-
-        {/* Bulk actions — only show when there are items */}
         {items.length > 1 && (
           <div className="flex gap-2">
-            <button
-              onClick={() => onApproveAll(queueType)}
-              disabled={isBulkBusy || !!processing}
-              className="flex-1 py-2 bg-[#059669]/20 hover:bg-[#059669]/30 border border-[#059669]/40 text-[#059669] text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
-            >
-              {isBulkBusy ? (
-                <span className="flex items-center justify-center gap-1.5">
-                  <svg className="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                  </svg>
-                  Processing...
-                </span>
-              ) : `✓ Approve All (${items.length})`}
+            <button onClick={() => onApproveAll(queueType)} disabled={isBulkBusy || !!processing}
+              className="flex-1 py-2 bg-[#059669]/20 hover:bg-[#059669]/30 border border-[#059669]/40 text-[#059669] text-xs font-semibold rounded-lg transition-colors disabled:opacity-40">
+              {isBulkBusy ? <span className="flex items-center justify-center gap-1.5"><svg className="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>Processing...</span> : `✓ Approve All (${items.length})`}
             </button>
-            <button
-              onClick={() => onRejectAll(queueType)}
-              disabled={isBulkBusy || !!processing}
-              className="flex-1 py-2 bg-red-950/30 hover:bg-red-950/50 border border-red-900/40 text-red-400 text-xs font-semibold rounded-lg transition-colors disabled:opacity-40"
-            >
+            <button onClick={() => onRejectAll(queueType)} disabled={isBulkBusy || !!processing}
+              className="flex-1 py-2 bg-red-950/30 hover:bg-red-950/50 border border-red-900/40 text-red-400 text-xs font-semibold rounded-lg transition-colors disabled:opacity-40">
               {isBulkBusy ? '...' : `✕ Reject All (${items.length})`}
             </button>
           </div>
         )}
       </div>
 
-      {/* Items list */}
       {loading ? (
         <div className="px-5 py-8 text-center text-slate-500 text-sm">Loading...</div>
       ) : items.length === 0 ? (
         <div className="px-5 py-8 text-center">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#059669" strokeWidth="2" className="mx-auto mb-2">
-            <polyline points="20 6 9 17 4 12" />
-          </svg>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#059669" strokeWidth="2" className="mx-auto mb-2"><polyline points="20 6 9 17 4 12"/></svg>
           <p className="text-slate-500 text-sm">All clear</p>
         </div>
       ) : (
         <div className="divide-y divide-[#1E3A8A]/30 max-h-80 overflow-y-auto">
           {items.map(item => {
             const suspicious = (item as unknown as { is_suspicious?: boolean }).is_suspicious
-            const value = (item as unknown as { value?: string }).value
+            const customValue = (item as unknown as { value?: string }).value
             const isItemBusy = processing === item.id || isBulkBusy
             return (
-              <div
-                key={item.id}
-                className={`px-5 py-4 transition-opacity ${isItemBusy ? 'opacity-40' : ''} ${suspicious ? 'bg-amber-950/30 border-l-2 border-amber-500' : ''}`}
-              >
+              <div key={item.id}
+                className={`px-5 py-4 transition-opacity ${isItemBusy ? 'opacity-40' : ''} ${suspicious ? 'bg-amber-950/30 border-l-2 border-amber-500' : ''}`}>
                 <div className="flex items-start justify-between gap-3">
-                  <div className="flex-1 min-w-0">
-                    {suspicious && (
-                      <span className="inline-block text-xs text-amber-400 font-semibold mb-1.5">⚠ Suspicious</span>
-                    )}
-                    {value ? (
-                      <p className="text-white text-sm font-medium">{value}</p>
+                  {/* Clickable detail area — FIX #3 */}
+                  <button className="flex-1 min-w-0 text-left" onClick={() => !customValue && onViewRecord(item)}>
+                    {suspicious && <span className="inline-block text-xs text-amber-400 font-semibold mb-1.5">⚠ Suspicious</span>}
+                    {customValue ? (
+                      <p className="text-white text-sm font-medium">{customValue}</p>
                     ) : (
                       <div className="space-y-0.5">
-                        <p className="text-white text-sm font-semibold">
+                        <p className="text-white text-sm font-semibold hover:text-[#059669] transition-colors">
                           {formatBDT((item as unknown as { salary?: number }).salary || 0)}/mo
+                          <span className="ml-2 text-[10px] text-slate-500 font-normal">tap to view</span>
                         </p>
                         <p className="text-slate-400 text-xs">
                           {(item as unknown as { area?: string }).area} · {(item as unknown as { student_level?: string }).student_level} · {(item as unknown as { curriculum?: string }).curriculum}
@@ -219,25 +367,16 @@ function QueuePanel({
                         <p className="text-slate-500 text-xs">
                           {(item as unknown as { university?: string }).university} — {(item as unknown as { department?: string }).department}
                         </p>
-                        <p className="text-slate-600 text-xs">
-                          {(item as unknown as { days_per_week?: number }).days_per_week}d/wk · {(item as unknown as { hours_per_session?: string }).hours_per_session}hr/session
-                        </p>
                       </div>
                     )}
-                  </div>
+                  </button>
                   <div className="flex gap-2 flex-shrink-0">
-                    <button
-                      onClick={() => onApprove(queueType, item.id!)}
-                      disabled={isItemBusy}
-                      className="px-3 py-1.5 bg-[#059669] hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-50"
-                    >
+                    <button onClick={() => onApprove(queueType, item.id!)} disabled={isItemBusy}
+                      className="px-3 py-1.5 bg-[#059669] hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-50">
                       {processing === item.id ? '...' : 'Approve'}
                     </button>
-                    <button
-                      onClick={() => onReject(queueType, item.id!)}
-                      disabled={isItemBusy}
-                      className="px-3 py-1.5 bg-slate-700 hover:bg-red-900 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-50"
-                    >
+                    <button onClick={() => onReject(queueType, item.id!)} disabled={isItemBusy}
+                      className="px-3 py-1.5 bg-slate-700 hover:bg-red-900 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-50">
                       Reject
                     </button>
                   </div>
@@ -251,20 +390,138 @@ function QueuePanel({
   )
 }
 
+// ─── All Records Panel (FIX #6) ───────────────────────────────────────────────
+
+function AllRecordsPanel({
+  onViewRecord,
+}: {
+  onViewRecord: (record: TuitionRecord & { id: string }) => void
+}) {
+  const [records, setRecords] = useState<Array<TuitionRecord & { id: string }>>([])
+  const [loading, setLoading] = useState(true)
+  const [filter, setFilter] = useState<'all' | 'approved' | 'pending' | 'rejected'>('all')
+  const [search, setSearch] = useState('')
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const all = await fetchAllRecords()
+      setRecords(all)
+    } catch {
+      // silent
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const filtered = records.filter(r => {
+    if (filter !== 'all' && r.status !== filter) return false
+    if (search.trim()) {
+      const q = search.toLowerCase()
+      return (
+        r.area?.toLowerCase().includes(q) ||
+        r.university?.toLowerCase().includes(q) ||
+        r.department?.toLowerCase().includes(q) ||
+        r.student_level?.toLowerCase().includes(q) ||
+        r.curriculum?.toLowerCase().includes(q)
+      )
+    }
+    return true
+  })
+
+  const statusBadge = (s: string) => {
+    const cfg: Record<string, string> = {
+      approved: 'bg-emerald-900/40 text-emerald-400',
+      pending: 'bg-amber-900/40 text-amber-400',
+      rejected: 'bg-red-900/40 text-red-400',
+    }
+    return <span className={`inline-block px-2 py-0.5 text-xs font-semibold rounded-full ${cfg[s] || ''}`}>{s}</span>
+  }
+
+  return (
+    <div className="bg-[#1E293B] border border-[#1E3A8A]/40 rounded-2xl overflow-hidden">
+      <div className="px-5 py-4 border-b border-[#1E3A8A]/40">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <h3 className="text-white font-semibold text-sm">All Salary Reports</h3>
+            <span className="text-slate-400 text-xs">({filtered.length} shown)</span>
+          </div>
+          <button onClick={load} disabled={loading}
+            className="text-xs text-slate-400 hover:text-white transition-colors disabled:opacity-50">
+            {loading ? 'Loading...' : '↻ Refresh'}
+          </button>
+        </div>
+        {/* Search + status filter */}
+        <div className="flex gap-2">
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search area, university, level..."
+            className="flex-1 px-3 py-1.5 bg-[#0F172A] border border-[#1E3A8A]/40 rounded-lg text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-[#059669]" />
+          <select value={filter} onChange={e => setFilter(e.target.value as typeof filter)}
+            className="px-3 py-1.5 bg-[#0F172A] border border-[#1E3A8A]/40 rounded-lg text-sm text-white focus:outline-none focus:border-[#059669]">
+            <option value="all">All</option>
+            <option value="approved">Approved</option>
+            <option value="pending">Pending</option>
+            <option value="rejected">Rejected</option>
+          </select>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="px-5 py-8 text-center text-slate-500 text-sm">Loading all records...</div>
+      ) : filtered.length === 0 ? (
+        <div className="px-5 py-8 text-center text-slate-500 text-sm">No records found</div>
+      ) : (
+        <div className="divide-y divide-[#1E3A8A]/30 max-h-[600px] overflow-y-auto">
+          {filtered.map(r => (
+            <button key={r.id} onClick={() => onViewRecord(r)}
+              className="w-full px-5 py-3.5 text-left hover:bg-white/5 transition-colors group">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-white text-sm font-semibold group-hover:text-[#059669] transition-colors">
+                      {formatBDT(r.salary)}/mo
+                    </span>
+                    {statusBadge(r.status)}
+                    {r.is_suspicious && <span className="text-xs text-amber-400 font-semibold">⚠</span>}
+                  </div>
+                  <p className="text-slate-400 text-xs truncate">
+                    {r.area} · {r.student_level} · {r.curriculum}
+                  </p>
+                  <p className="text-slate-500 text-xs truncate">
+                    {r.university} — {r.department} · {formatDate(r.created_at)}
+                  </p>
+                </div>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#475569" strokeWidth="2" className="flex-shrink-0 group-hover:stroke-[#059669] transition-colors">
+                  <path d="M9 18l6-6-6-6"/>
+                </svg>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 
+type AdminTab = 'queues' | 'all-records'
+
 function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () => void }) {
-  const {
-    items, loading, processing, bulkProcessing,
-    approve, reject, approveAll, rejectAll,
-    refresh, refreshAll,
-  } = useAdminQueue()
+  const { items, loading, processing, bulkProcessing, approve, reject, approveAll, rejectAll, refresh, refreshAll } = useAdminQueue()
   const [adminStats, setAdminStats] = useState<AdminStats | null>(null)
+  const [activeTab, setActiveTab] = useState<AdminTab>('queues')
+  const [selectedRecord, setSelectedRecord] = useState<(TuitionRecord & { id: string }) | null>(null)
+  const [options, setOptions] = useState<ApprovedOptions>({ areas: [], subjects: [], universities: [], departments: [] })
 
   useEffect(() => {
     refreshAll()
     fetchAdminStats().then(setAdminStats).catch(() => {})
+    fetchApprovedOptions().then(setOptions).catch(() => {})
   }, [refreshAll])
+
+  const totalPending = Object.values(items).reduce((sum, arr) => sum + arr.length, 0)
 
   const queuePanels = [
     { title: 'Salary Reports', queueType: 'records' },
@@ -274,7 +531,12 @@ function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () 
     { title: 'New Departments', queueType: 'departments' },
   ]
 
-  const totalPending = Object.values(items).reduce((sum, arr) => sum + arr.length, 0)
+  // When a record is saved from the modal, update it in-place in the queue list
+  const handleRecordSaved = useCallback((updated: TuitionRecord & { id: string }) => {
+    setSelectedRecord(updated)
+    // Refresh stats
+    fetchAdminStats().then(setAdminStats).catch(() => {})
+  }, [])
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8">
@@ -291,10 +553,8 @@ function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () 
           </h1>
           <p className="text-slate-400 text-sm mt-0.5">{userEmail}</p>
         </div>
-        <button
-          onClick={onSignOut}
-          className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white text-sm font-medium rounded-lg transition-colors"
-        >
+        <button onClick={onSignOut}
+          className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white text-sm font-medium rounded-lg transition-colors">
           Sign Out
         </button>
       </div>
@@ -313,31 +573,62 @@ function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () 
         </div>
       )}
 
-      {/* Moderation queues */}
-      <h2 className="text-white font-semibold text-lg mb-4">Moderation Queues</h2>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        {queuePanels.map(({ title, queueType }) => (
-          <QueuePanel
-            key={queueType}
-            title={title}
-            queueType={queueType}
-            items={items[queueType] || []}
-            loading={loading[queueType] || false}
-            processing={processing}
-            bulkProcessing={bulkProcessing}
-            onApprove={approve}
-            onReject={reject}
-            onApproveAll={approveAll}
-            onRejectAll={rejectAll}
-            onRefresh={refresh}
-          />
-        ))}
+      {/* Tabs — FIX #6 */}
+      <div className="flex gap-1 mb-6 bg-[#1E293B] border border-[#1E3A8A]/40 rounded-xl p-1 w-fit">
+        <button onClick={() => setActiveTab('queues')}
+          className={`px-5 py-2 text-sm font-semibold rounded-lg transition-colors ${activeTab === 'queues' ? 'bg-[#059669] text-white' : 'text-slate-400 hover:text-white'}`}>
+          Moderation Queues
+          {totalPending > 0 && <span className="ml-2 inline-flex items-center justify-center w-4 h-4 bg-amber-500 text-white text-xs font-bold rounded-full">{totalPending}</span>}
+        </button>
+        <button onClick={() => setActiveTab('all-records')}
+          className={`px-5 py-2 text-sm font-semibold rounded-lg transition-colors ${activeTab === 'all-records' ? 'bg-[#059669] text-white' : 'text-slate-400 hover:text-white'}`}>
+          All Reports
+        </button>
       </div>
+
+      {/* Moderation Queues tab */}
+      {activeTab === 'queues' && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+          {queuePanels.map(({ title, queueType }) => (
+            <QueuePanel
+              key={queueType}
+              title={title}
+              queueType={queueType}
+              items={items[queueType] || []}
+              loading={loading[queueType] || false}
+              processing={processing}
+              bulkProcessing={bulkProcessing}
+              onApprove={approve}
+              onReject={reject}
+              onApproveAll={approveAll}
+              onRejectAll={rejectAll}
+              onRefresh={refresh}
+              onViewRecord={setSelectedRecord}
+              options={options}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* All Records tab — FIX #6 */}
+      {activeTab === 'all-records' && (
+        <AllRecordsPanel onViewRecord={setSelectedRecord} />
+      )}
+
+      {/* Record detail modal — FIX #3 + #5 */}
+      {selectedRecord && (
+        <RecordModal
+          record={selectedRecord}
+          options={options}
+          onClose={() => setSelectedRecord(null)}
+          onSaved={handleRecordSaved}
+        />
+      )}
     </div>
   )
 }
 
-// ─── Root Admin Page ───────────────────────────────────────────────────────────
+// ─── Root ──────────────────────────────────────────────────────────────────────
 
 export default function AdminPage() {
   const [user, setUser] = useState<{ email: string } | null>(null)
@@ -354,9 +645,7 @@ export default function AdminPage() {
           setUser(u ? { email: u.email || '' } : null)
           setChecking(false)
         })
-      } catch {
-        setChecking(false)
-      }
+      } catch { setChecking(false) }
     })()
     return () => { if (unsubscribe) unsubscribe() }
   }, [])
@@ -371,17 +660,12 @@ export default function AdminPage() {
     } catch {}
   }, [])
 
-  if (checking) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="text-slate-400 text-sm">Checking session...</div>
-      </div>
-    )
-  }
+  if (checking) return (
+    <div className="min-h-screen flex items-center justify-center">
+      <div className="text-slate-400 text-sm">Checking session...</div>
+    </div>
+  )
 
-  if (!user) {
-    return <LoginScreen onLogin={() => {}} />
-  }
-
+  if (!user) return <LoginScreen onLogin={() => {}} />
   return <Dashboard userEmail={user.email} onSignOut={handleSignOut} />
 }

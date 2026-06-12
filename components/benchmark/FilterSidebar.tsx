@@ -10,7 +10,9 @@ import type { BenchmarkFilters, StudentLevel, Curriculum, AcademicYear, Approved
 interface FilterSidebarProps {
   filters: BenchmarkFilters
   onFiltersChange: (filters: BenchmarkFilters) => void
-  onApply: () => void
+  // FIX #1: onApply now receives the latest local filters directly so the
+  // parent can pass them straight to runBenchmark without waiting for state flush
+  onApply: (latestFilters: BenchmarkFilters) => void
   onClear: () => void
   activeFilterCount: number
   loading: boolean
@@ -26,7 +28,6 @@ export function FilterSidebar({
 }: FilterSidebarProps) {
   const [local, setLocal] = useState<BenchmarkFilters>(filters)
 
-  // Start with static lists; upgrade to merged list (static + approved custom) async
   const [options, setOptions] = useState<ApprovedOptions>({
     areas: [...AREAS].sort(),
     subjects: [...SUBJECTS].sort(),
@@ -43,8 +44,9 @@ export function FilterSidebar({
   }
 
   const handleApply = () => {
+    // Sync parent state AND pass local directly to onApply in the same tick
     onFiltersChange(local)
-    onApply()
+    onApply(local)
   }
 
   const handleClear = () => {

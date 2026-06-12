@@ -13,27 +13,31 @@ interface UseBenchmarkReturn {
   filtersApplied: boolean
   activeFilterCount: number
   setFilters: (filters: BenchmarkFilters) => void
-  runBenchmark: () => Promise<void>
+  runBenchmark: (filtersOverride?: BenchmarkFilters) => Promise<void>
   clearFilters: () => void
 }
 
 export function useBenchmark(): UseBenchmarkReturn {
   const [filters, setFiltersState] = useState<BenchmarkFilters>({})
   const [stats, setStats] = useState<BenchmarkStats | null>(null)
-  const [loading, setLoading] = useState(true) // true on mount — fetching immediately
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [filtersApplied, setFiltersApplied] = useState(true) // treat initial load as applied
+  const [filtersApplied, setFiltersApplied] = useState(true)
 
   const activeFilterCount = Object.values(filters).filter(v =>
     v !== undefined && v !== '' && !(Array.isArray(v) && v.length === 0)
   ).length
 
+  // FIX #1: setFilters now returns the new value so callers can pass it directly
+  // to runBenchmark without waiting for React state to flush.
   const setFilters = useCallback((f: BenchmarkFilters) => {
     setFiltersState(f)
   }, [])
 
-  const runBenchmark = useCallback(async (filtersToRun?: BenchmarkFilters) => {
-    const f = filtersToRun ?? filters
+  // FIX #1: runBenchmark accepts an explicit filtersOverride so FilterSidebar
+  // can pass the latest local filters directly — no stale-closure issue.
+  const runBenchmark = useCallback(async (filtersOverride?: BenchmarkFilters) => {
+    const f = filtersOverride !== undefined ? filtersOverride : filters
     setLoading(true)
     setError(null)
     setFiltersApplied(true)
@@ -51,7 +55,7 @@ export function useBenchmark(): UseBenchmarkReturn {
     }
   }, [filters])
 
-  // Auto-run on mount with empty filters (shows all data by default)
+  // Auto-run on mount with empty filters
   useEffect(() => {
     runBenchmark({})
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -60,7 +64,6 @@ export function useBenchmark(): UseBenchmarkReturn {
   const clearFilters = useCallback(async () => {
     setFiltersState({})
     setError(null)
-    // Re-run with empty filters to restore default view
     setLoading(true)
     setFiltersApplied(true)
     try {

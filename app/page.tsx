@@ -2,6 +2,10 @@ import Link from 'next/link'
 import { fetchSiteStats } from '../lib/benchmark'
 import { formatBDT } from '../lib/benchmark'
 
+// FIX #2: disable Next.js cache so stats always reflect live Firestore data
+export const revalidate = 0
+export const dynamic = 'force-dynamic'
+
 async function HeroStats() {
   try {
     const stats = await fetchSiteStats()

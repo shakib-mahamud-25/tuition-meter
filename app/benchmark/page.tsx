@@ -6,6 +6,7 @@ import { useState } from 'react'
 import { useBenchmark } from '../../hooks/useBenchmark'
 import { FilterSidebar } from '../../components/benchmark/FilterSidebar'
 import { BenchmarkResult } from '../../components/benchmark/BenchmarkResult'
+import type { BenchmarkFilters } from '../../lib/types'
 
 export default function BenchmarkPage() {
   const {
@@ -15,10 +16,15 @@ export default function BenchmarkPage() {
 
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false)
 
+  // FIX #1: receive latestFilters from sidebar and pass directly to runBenchmark
+  const handleApply = (latestFilters: BenchmarkFilters) => {
+    runBenchmark(latestFilters)
+  }
+
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-10">
 
-      {/* ── Page header ──────────────────────────────────────────── */}
+      {/* Page header */}
       <div className="flex items-start justify-between gap-4 mb-6">
         <div>
           <h1 className="text-2xl sm:text-3xl font-bold text-slate-900">Salary Benchmark</h1>
@@ -26,8 +32,6 @@ export default function BenchmarkPage() {
             Real tuition salary data from Bangladesh tutors.
           </p>
         </div>
-
-        {/* Mobile: filter toggle button */}
         <button
           className="lg:hidden flex items-center gap-2 px-4 py-2.5 bg-white border border-[#E2E8F0] rounded-xl text-sm font-semibold text-slate-700 shadow-sm flex-shrink-0"
           onClick={() => setMobileFiltersOpen(o => !o)}
@@ -47,14 +51,14 @@ export default function BenchmarkPage() {
         </button>
       </div>
 
-      {/* ── Mobile filter drawer ─────────────────────────────────── */}
+      {/* Mobile filter drawer */}
       {mobileFiltersOpen && (
         <div className="lg:hidden mb-5">
           <div className="bg-white border border-[#E2E8F0] rounded-2xl overflow-hidden shadow-sm">
             <FilterSidebar
               filters={filters}
               onFiltersChange={setFilters}
-              onApply={() => { runBenchmark(); setMobileFiltersOpen(false) }}
+              onApply={(lf) => { handleApply(lf); setMobileFiltersOpen(false) }}
               onClear={clearFilters}
               activeFilterCount={activeFilterCount}
               loading={loading}
@@ -63,15 +67,13 @@ export default function BenchmarkPage() {
         </div>
       )}
 
-      {/* ── Main layout: sidebar + results ──────────────────────── */}
       <div className="flex gap-6 items-start">
-
-        {/* Desktop sidebar — sticky */}
+        {/* Desktop sidebar */}
         <div className="w-72 flex-shrink-0 sticky top-24 hidden lg:block">
           <FilterSidebar
             filters={filters}
             onFiltersChange={setFilters}
-            onApply={runBenchmark}
+            onApply={handleApply}
             onClear={clearFilters}
             activeFilterCount={activeFilterCount}
             loading={loading}
@@ -80,8 +82,6 @@ export default function BenchmarkPage() {
 
         {/* Results panel */}
         <div className="flex-1 min-w-0">
-
-          {/* Active filter chips */}
           {activeFilterCount > 0 && (
             <div className="flex items-center gap-2 mb-4 flex-wrap">
               <span className="text-xs text-slate-500">
@@ -95,7 +95,6 @@ export default function BenchmarkPage() {
               </button>
             </div>
           )}
-
           <BenchmarkResult
             stats={stats}
             loading={loading}

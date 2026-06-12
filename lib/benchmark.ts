@@ -363,3 +363,28 @@ export async function fetchPendingQueue(
   )
   return snap.docs.map(d => ({ id: d.id, ...(d.data() as TuitionRecord) }))
 }
+
+// ─── Fetch ALL records (for admin All Records tab) ────────────────────────────
+
+export async function fetchAllRecords(): Promise<Array<TuitionRecord & { id: string }>> {
+  const db = await getDb()
+  const snap = await getDocs(collection(db, 'tuition_records'))
+  return snap.docs
+    .map(d => ({ id: d.id, ...(d.data() as TuitionRecord) }))
+    .sort((a, b) => {
+      // Most recent first
+      const ta = a.created_at instanceof Timestamp ? a.created_at.toMillis() : 0
+      const tb = b.created_at instanceof Timestamp ? b.created_at.toMillis() : 0
+      return tb - ta
+    })
+}
+
+// ─── Update record fields (admin edit) ───────────────────────────────────────
+
+export async function updateRecordFields(
+  id: string,
+  fields: Partial<Omit<TuitionRecord, 'id' | 'created_at' | 'source_version' | 'submitted_from'>>
+): Promise<void> {
+  const db = await getDb()
+  await updateDoc(doc(db, 'tuition_records', id), { ...fields })
+}
