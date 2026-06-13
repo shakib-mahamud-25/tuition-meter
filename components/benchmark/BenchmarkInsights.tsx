@@ -13,12 +13,17 @@ function SectionHeading({ children }: { children: React.ReactNode }) {
 }
 
 // ─── 1. Salary Histogram ──────────────────────────────────────────────────────
+// Fixed height of the chart area in pixels. All bar heights are computed as
+// explicit pixel values against this constant — percentage heights are
+// unreliable when bars are nested inside a flex wrapper.
+const CHART_HEIGHT_PX = 128
 
 export function SalaryHistogram({ stats }: { stats: BenchmarkStats }) {
   const { histogram, p25, p75, median } = stats
   if (!histogram || histogram.length === 0) return null
 
   const maxCount = Math.max(...histogram.map(b => b.count), 1)
+  const MIN_BAR_PX = 4 // always show at least a sliver so the bar is visible
 
   return (
     <div className="bg-white border border-[#E2E8F0] rounded-xl p-5">
@@ -26,16 +31,26 @@ export function SalaryHistogram({ stats }: { stats: BenchmarkStats }) {
       <p className="text-xs text-slate-400 mb-5">
         How many tutors earn within each salary band — reveals the shape of the market.
       </p>
-      <div className="flex items-end gap-1.5 h-32">
+
+      {/* Chart area — fixed pixel height, position:relative so bars can use absolute bottom:0 */}
+      <div className="flex items-end gap-1.5" style={{ height: CHART_HEIGHT_PX }}>
         {histogram.map((bucket, i) => {
-          const heightPct = (bucket.count / maxCount) * 100
-          // Highlight buckets that overlap the IQR
+          const barPx = Math.max(
+            Math.round((bucket.count / maxCount) * CHART_HEIGHT_PX),
+            MIN_BAR_PX
+          )
           const inIQR = bucket.rangeMax > p25 && bucket.rangeMin < p75
           const hasMedian = median >= bucket.rangeMin && median <= bucket.rangeMax
 
           return (
-            <div key={i} className="flex-1 flex flex-col items-center gap-1 group relative">
-              {/* Tooltip */}
+            // Column wrapper: fills available width, has the full chart height so
+            // the tooltip (bottom-full) and count label (-top-5) both position correctly.
+            <div
+              key={i}
+              className="group relative flex-1"
+              style={{ height: CHART_HEIGHT_PX }}
+            >
+              {/* Hover tooltip */}
               <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 z-10
                 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none
                 bg-slate-800 text-white text-xs rounded-lg px-2.5 py-1.5 whitespace-nowrap shadow-lg">
@@ -44,30 +59,33 @@ export function SalaryHistogram({ stats }: { stats: BenchmarkStats }) {
                 {hasMedian && <p className="text-[#34D399] text-[10px] mt-0.5">← median range</p>}
               </div>
 
-              {/* Count label — only on tallest */}
+              {/* Count label above the tallest bar only */}
               {bucket.count === maxCount && (
-                <span className="text-[10px] text-slate-500 font-semibold mb-0.5 absolute -top-5">
+                <span
+                  className="absolute left-1/2 -translate-x-1/2 text-[10px] text-slate-500 font-semibold whitespace-nowrap"
+                  style={{ bottom: barPx + 4 }}
+                >
                   {bucket.count}
                 </span>
               )}
 
-              {/* Bar */}
+              {/* Bar — anchored to bottom using absolute positioning */}
               <div
-                style={{ height: `${Math.max(heightPct, 4)}%` }}
-                className={`w-full rounded-t-md transition-all ${
+                className={`absolute bottom-0 left-0 right-0 rounded-t-md transition-colors ${
                   hasMedian
                     ? 'bg-[#059669]'
                     : inIQR
                     ? 'bg-[#059669]/40'
                     : 'bg-slate-200 group-hover:bg-slate-300'
                 }`}
+                style={{ height: barPx }}
               />
             </div>
           )
         })}
       </div>
 
-      {/* X-axis labels — first and last */}
+      {/* X-axis labels */}
       <div className="flex justify-between mt-2 text-[10px] text-slate-400">
         <span>{histogram[0].label.split('–')[0]}</span>
         <span>{histogram[histogram.length - 1].label.split('–')[1]}</span>
