@@ -1,5 +1,6 @@
 import { ConfidenceBadge } from '../ui/ConfidenceBadge'
 import { SalaryRangeBar } from './SalaryRangeBar'
+import { SalaryHistogram, SalaryBreakdown, AreaRankingTable, YourSalaryWidget } from './BenchmarkInsights'
 import { formatBDT, generateInsight } from '../../lib/benchmark'
 import type { BenchmarkStats } from '../../lib/types'
 
@@ -30,12 +31,8 @@ function SkeletonCard() {
 }
 
 export function BenchmarkResult({ stats, loading, filtersApplied, error }: BenchmarkResultProps) {
-  // Empty state — only shown if somehow filtersApplied is false and not loading
-  if (!filtersApplied && !loading) {
-    return null
-  }
+  if (!filtersApplied && !loading) return null
 
-  // Loading state
   if (loading) {
     return (
       <div className="space-y-4">
@@ -51,7 +48,6 @@ export function BenchmarkResult({ stats, loading, filtersApplied, error }: Bench
     )
   }
 
-  // Error state
   if (error) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center px-4">
@@ -66,7 +62,6 @@ export function BenchmarkResult({ stats, loading, filtersApplied, error }: Bench
     )
   }
 
-  // Zero results
   if (stats && stats.sample_size === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center px-4">
@@ -96,24 +91,38 @@ export function BenchmarkResult({ stats, loading, filtersApplied, error }: Bench
 
       {/* Insight box */}
       <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-4">
-        <p className="text-[#059669] text-sm leading-relaxed font-medium">{insight}</p>
+        <p className="text-[#059669] text-sm leading-relaxed font-medium">💡 {insight}</p>
       </div>
 
       {/* Stats grid */}
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
         <StatCard label="Weighted Average" value={formatBDT(stats.average)} sub="freshness-adjusted" />
-        <StatCard label="Median Salary" value={formatBDT(stats.median)} sub="unweighted" />
-        <StatCard label="Sample Size" value={stats.sample_size.toString()} sub="matching reports" />
-        <StatCard label="Lowest" value={formatBDT(stats.min)} />
-        <StatCard label="Highest" value={formatBDT(stats.max)} />
-        <StatCard label="IQR Range" value={`${formatBDT(stats.p25)} – ${formatBDT(stats.p75)}`} sub="middle 50%" />
+        <StatCard label="Median Salary"    value={formatBDT(stats.median)} sub="unweighted" />
+        <StatCard label="Sample Size"      value={stats.sample_size.toString()} sub="matching reports" />
+        <StatCard label="Lowest"           value={formatBDT(stats.min)} />
+        <StatCard label="Highest"          value={formatBDT(stats.max)} />
+        <StatCard label="IQR Range"        value={`${formatBDT(stats.p25)} – ${formatBDT(stats.p75)}`} sub="middle 50%" />
       </div>
 
       {/* Range bar */}
       <div className="bg-white border border-[#E2E8F0] rounded-xl p-5">
-        <p className="text-sm font-semibold text-slate-700 mb-5">Salary Distribution</p>
+        <p className="text-sm font-semibold text-slate-700 mb-5">Salary Range</p>
         <SalaryRangeBar stats={stats} />
       </div>
+
+      {/* ── Four new insight panels ──────────────────────────────────────────── */}
+
+      {/* 1. Histogram */}
+      <SalaryHistogram stats={stats} />
+
+      {/* 2. Breakdown bars (level + curriculum) */}
+      <SalaryBreakdown stats={stats} />
+
+      {/* 3. Area ranking */}
+      <AreaRankingTable stats={stats} />
+
+      {/* 4. Your salary widget */}
+      <YourSalaryWidget stats={stats} />
     </div>
   )
 }

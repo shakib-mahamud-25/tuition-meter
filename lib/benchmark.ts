@@ -21,6 +21,9 @@ import type {
   ApprovedOptions,
   TuitionRecord,
   ConfidenceLevel,
+  HistogramBucket,
+  BreakdownBar,
+  AreaRanking,
   FilterCounts,
 } from './types'
 
@@ -49,7 +52,7 @@ function getConfidence(sampleSize: number): ConfidenceLevel {
 }
 
 function getFreshnessWeight(createdAt: Timestamp | Date | null | undefined): number {
-  if (!createdAt) return 1.0 // brand new record — treat as fully fresh
+  if (!createdAt) return 1.0
   const now = Date.now()
   let ts: number
   try {
@@ -68,7 +71,7 @@ function getFreshnessWeight(createdAt: Timestamp | Date | null | undefined): num
 }
 
 function getTimestamp(createdAt: Timestamp | Date | null | undefined): number {
-  if (!createdAt) return Date.now() // null means just written — treat as now
+  if (!createdAt) return Date.now()
   try {
     return createdAt instanceof Timestamp
       ? createdAt.toDate().getTime()
@@ -76,6 +79,104 @@ function getTimestamp(createdAt: Timestamp | Date | null | undefined): number {
   } catch {
     return Date.now()
   }
+}
+
+// ─── Histogram builder ────────────────────────────────────────────────────────
+// Produces 6–8 human-friendly salary buckets covering [min, max].
+// Bucket boundaries are rounded to "nice" numbers so labels are readable.
+
+function buildHistogram(sortedSalaries: number[]): HistogramBucket[] {
+  if (sortedSalaries.length === 0) return []
+  const min = sortedSalaries[0]
+  const max = sortedSalaries[sortedSalaries.length - 1]
+  if (min === max) {
+    return [{ label: formatBDT(min), rangeMin: min, rangeMax: max, count: sortedSalaries.length }]
+  }
+
+  // Choose a "nice" step size that yields 6–8 buckets
+  const rawRange = max - min
+  const targetBuckets = 7
+  const rawStep = rawRange / targetBuckets
+
+  // Round step up to nearest nice number (500, 1000, 2000, 5000, 10000…)
+  const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep)))
+  const niceMultiples = [1, 2, 2.5, 5, 10]
+  let step = magnitude * 10
+  for (const m of niceMultiples) {
+    const candidate = magnitude * m
+    if (candidate >= rawStep) { step = candidate; break }
+  }
+
+  // First boundary: floor min to nearest step
+  const firstBoundary = Math.floor(min / step) * step
+  const boundaries: number[] = []
+  let b = firstBoundary
+  while (b <= max + step) {
+    boundaries.push(b)
+    b += step
+    if (boundaries.length > 12) break // safety cap
+  }
+
+  // Build buckets
+  const buckets: HistogramBucket[] = []
+  for (let i = 0; i < boundaries.length - 1; i++) {
+    const rangeMin = boundaries[i]
+    const rangeMax = boundaries[i + 1]
+    const count = sortedSalaries.filter(s =>
+      i === boundaries.length - 2 ? s >= rangeMin && s <= rangeMax : s >= rangeMin && s < rangeMax
+    ).length
+    // Only include buckets that overlap [min, max]
+    if (rangeMax < min || rangeMin > max) continue
+    const kLabel = (v: number) => v >= 1000 ? `${v / 1000 % 1 === 0 ? v / 1000 : (v / 1000).toFixed(1)}k` : v.toString()
+    buckets.push({
+      label: `৳${kLabel(rangeMin)}–৳${kLabel(rangeMax)}`,
+      rangeMin,
+      rangeMax,
+      count,
+    })
+  }
+  return buckets
+}
+
+// ─── Breakdown builder ────────────────────────────────────────────────────────
+// Groups records by a string key and computes average salary per group.
+
+function buildBreakdown(
+  records: TuitionRecord[],
+  key: keyof Pick<TuitionRecord, 'student_level' | 'curriculum'>
+): BreakdownBar[] {
+  const groups: Record<string, number[]> = {}
+  for (const r of records) {
+    const k = r[key] as string
+    if (!k) continue
+    if (!groups[k]) groups[k] = []
+    groups[k].push(r.salary)
+  }
+  return Object.entries(groups)
+    .map(([label, salaries]) => ({
+      label,
+      average: Math.round(salaries.reduce((s, v) => s + v, 0) / salaries.length),
+      count: salaries.length,
+    }))
+    .sort((a, b) => b.average - a.average)
+}
+
+// ─── Area ranking builder ─────────────────────────────────────────────────────
+
+function buildAreaRankings(records: TuitionRecord[]): AreaRanking[] {
+  const groups: Record<string, number[]> = {}
+  for (const r of records) {
+    if (!r.area) continue
+    if (!groups[r.area]) groups[r.area] = []
+    groups[r.area].push(r.salary)
+  }
+  return Object.entries(groups)
+    .map(([area, salaries]) => ({
+      area,
+      average: Math.round(salaries.reduce((s, v) => s + v, 0) / salaries.length),
+      count: salaries.length,
+    }))
+    .sort((a, b) => b.average - a.average)
 }
 
 // ─── Insight generation ───────────────────────────────────────────────────────
@@ -117,7 +218,7 @@ export async function fetchBenchmarkData(
     ...(d.data() as TuitionRecord),
   }))
 
-  // Date window filter — null created_at (brand-new record) always passes
+  // Date window filter
   records = records.filter(r => {
     const ts = getTimestamp(r.created_at)
     return ts >= cutoff
@@ -140,6 +241,14 @@ export async function fetchBenchmarkData(
   const salaries = records.map(r => r.salary).sort((a, b) => a - b)
   const sample_size = salaries.length
 
+  const emptyViz = {
+    histogram: [] as HistogramBucket[],
+    levelBreakdown: [] as BreakdownBar[],
+    curriculumBreakdown: [] as BreakdownBar[],
+    areaRankings: [] as AreaRanking[],
+    sortedSalaries: [] as number[],
+  }
+
   if (sample_size === 0) {
     return {
       sample_size: 0,
@@ -150,6 +259,7 @@ export async function fetchBenchmarkData(
       p25: 0,
       p75: 0,
       confidence: 'low',
+      ...emptyViz,
     }
   }
 
@@ -172,6 +282,12 @@ export async function fetchBenchmarkData(
     p25: Math.round(percentile(salaries, 25)),
     p75: Math.round(percentile(salaries, 75)),
     confidence: getConfidence(sample_size),
+    // ── Visualisation data ────────────────────────────────────────────────────
+    histogram: buildHistogram(salaries),
+    levelBreakdown: buildBreakdown(records, 'student_level'),
+    curriculumBreakdown: buildBreakdown(records, 'curriculum'),
+    areaRankings: buildAreaRankings(records),
+    sortedSalaries: salaries,
   }
 }
 
@@ -271,9 +387,7 @@ export async function rejectAllInQueue(
   )
 }
 
-// ─── Fetch approved options (for submit form + benchmark filters) ─────────────
-// Merges static base lists with admin-approved custom items from Firestore.
-// pending_* collections are now publicly readable (firestore.rules updated).
+// ─── Fetch approved options ───────────────────────────────────────────────────
 
 export async function fetchApprovedOptions(): Promise<ApprovedOptions> {
   try {
@@ -295,7 +409,6 @@ export async function fetchApprovedOptions(): Promise<ApprovedOptions> {
       departments: merge(DEPARTMENTS, deptsSnap),
     }
   } catch {
-    // Firestore unavailable — fall back to static lists
     return {
       areas: [...AREAS].sort(),
       subjects: [...SUBJECTS].sort(),
@@ -306,9 +419,6 @@ export async function fetchApprovedOptions(): Promise<ApprovedOptions> {
 }
 
 // ─── Filter counts ────────────────────────────────────────────────────────────
-// Counts how many approved records exist per option value, for use in the
-// benchmark filter sidebar labels (e.g. "Bangla Medium (150)").
-// Uses the same single-query + client-side approach as fetchBenchmarkData.
 
 export async function fetchFilterCounts(): Promise<FilterCounts> {
   try {
@@ -328,7 +438,6 @@ export async function fetchFilterCounts(): Promise<FilterCounts> {
 
     for (const d of snap.docs) {
       const r = d.data() as TuitionRecord
-
       if (r.area) areas[r.area] = (areas[r.area] || 0) + 1
       if (r.university) universities[r.university] = (universities[r.university] || 0) + 1
       if (r.department) departments[r.department] = (departments[r.department] || 0) + 1
@@ -413,7 +522,7 @@ export async function fetchPendingQueue(
   return snap.docs.map(d => ({ id: d.id, ...(d.data() as TuitionRecord) }))
 }
 
-// ─── Fetch ALL records (for admin All Records tab) ────────────────────────────
+// ─── Fetch ALL records ────────────────────────────────────────────────────────
 
 export async function fetchAllRecords(): Promise<Array<TuitionRecord & { id: string }>> {
   const db = await getDb()
@@ -421,14 +530,13 @@ export async function fetchAllRecords(): Promise<Array<TuitionRecord & { id: str
   return snap.docs
     .map(d => ({ id: d.id, ...(d.data() as TuitionRecord) }))
     .sort((a, b) => {
-      // Most recent first
       const ta = a.created_at instanceof Timestamp ? a.created_at.toMillis() : 0
       const tb = b.created_at instanceof Timestamp ? b.created_at.toMillis() : 0
       return tb - ta
     })
 }
 
-// ─── Update record fields (admin edit) ───────────────────────────────────────
+// ─── Update record fields ─────────────────────────────────────────────────────
 
 export async function updateRecordFields(
   id: string,
@@ -438,7 +546,7 @@ export async function updateRecordFields(
   await updateDoc(doc(db, 'tuition_records', id), { ...fields })
 }
 
-// ─── Fetch ALL items from a pending collection (admin "All" tabs) ─────────────
+// ─── Fetch ALL items from a pending collection ────────────────────────────────
 
 export interface PendingItemDoc {
   id: string
@@ -461,7 +569,7 @@ export async function fetchAllPendingItems(
     })
 }
 
-// ─── Update a pending item's value and/or status ──────────────────────────────
+// ─── Update a pending item ────────────────────────────────────────────────────
 
 export async function updatePendingItem(
   collectionName: string,
@@ -473,17 +581,6 @@ export async function updatePendingItem(
 }
 
 // ─── Find & Replace ───────────────────────────────────────────────────────────
-// Replaces all occurrences of `findValue` (case-insensitive) with `replaceValue`
-// across tuition_records AND the corresponding pending_* collection.
-//
-// fieldKey: which field in tuition_records to search ('area' | 'university' |
-//           'department' | 'subjects')
-// pendingCollection: the corresponding pending_* collection name
-//
-// For 'subjects', the field is an array — each element is checked individually.
-// For all other fields, the field is a plain string.
-//
-// Returns the total number of documents updated.
 
 export type FindReplaceField = 'area' | 'university' | 'department' | 'subjects'
 
@@ -503,14 +600,9 @@ export async function findAndReplace(
   const findLower = findValue.trim().toLowerCase()
   const replaceClean = replaceValue.trim()
 
-  if (!findLower || !replaceClean) {
-    throw new Error('Both find and replace values are required.')
-  }
-  if (findLower === replaceClean.toLowerCase()) {
-    throw new Error('Find and replace values are identical.')
-  }
+  if (!findLower || !replaceClean) throw new Error('Both find and replace values are required.')
+  if (findLower === replaceClean.toLowerCase()) throw new Error('Find and replace values are identical.')
 
-  // ── 1. Update tuition_records ──────────────────────────────────────────────
   const recordsSnap = await getDocs(collection(db, 'tuition_records'))
   const recordBatch = writeBatch(db)
   let updatedRecords = 0
@@ -520,18 +612,13 @@ export async function findAndReplace(
     const ref = doc(db, 'tuition_records', docSnap.id)
 
     if (fieldKey === 'subjects') {
-      // Array field: replace matching elements
       const original = Array.isArray(data.subjects) ? data.subjects : []
-      const updated = original.map(s =>
-        s.toLowerCase() === findLower ? replaceClean : s
-      )
-      const changed = updated.some((s, i) => s !== original[i])
-      if (changed) {
+      const updated = original.map(s => s.toLowerCase() === findLower ? replaceClean : s)
+      if (updated.some((s, i) => s !== original[i])) {
         recordBatch.update(ref, { subjects: updated })
         updatedRecords++
       }
     } else {
-      // String field: replace if it matches (case-insensitive)
       const current = (data[fieldKey] as string) || ''
       if (current.toLowerCase() === findLower) {
         recordBatch.update(ref, { [fieldKey]: replaceClean })
@@ -542,22 +629,18 @@ export async function findAndReplace(
 
   await recordBatch.commit()
 
-  // ── 2. Update corresponding pending_* collection ──────────────────────────
-  const pendingCollection = FIELD_TO_PENDING[fieldKey]
-  const pendingSnap = await getDocs(collection(db, pendingCollection))
+  const pendingSnap = await getDocs(collection(db, FIELD_TO_PENDING[fieldKey]))
   const pendingBatch = writeBatch(db)
   let updatedPendingItems = 0
 
   for (const docSnap of pendingSnap.docs) {
     const data = docSnap.data() as { value: string }
     if ((data.value || '').toLowerCase() === findLower) {
-      const ref = doc(db, pendingCollection, docSnap.id)
-      pendingBatch.update(ref, { value: replaceClean })
+      pendingBatch.update(doc(db, FIELD_TO_PENDING[fieldKey], docSnap.id), { value: replaceClean })
       updatedPendingItems++
     }
   }
 
   await pendingBatch.commit()
-
   return { updatedRecords, updatedPendingItems }
 }

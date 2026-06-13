@@ -66,6 +66,31 @@ export interface BenchmarkFilters {
   days_per_week?: number
 }
 
+// ─── Histogram bucket ─────────────────────────────────────────────────────────
+export interface HistogramBucket {
+  label: string       // e.g. "৳5k–৳10k"
+  rangeMin: number    // inclusive lower bound
+  rangeMax: number    // exclusive upper bound (inclusive for last bucket)
+  count: number
+}
+
+// ─── Breakdown bar (level or curriculum comparison) ───────────────────────────
+export interface BreakdownBar {
+  label: string       // e.g. "HSC Candidate" or "English Medium"
+  average: number
+  count: number
+}
+
+// ─── Area ranking entry ───────────────────────────────────────────────────────
+export interface AreaRanking {
+  area: string
+  average: number
+  count: number
+}
+
+// ─── Salary percentile for user comparison ────────────────────────────────────
+// Sorted ascending salaries from the current filtered set, used by the
+// "Your salary vs benchmark" widget to find percentile rank.
 export interface BenchmarkStats {
   sample_size: number
   average: number
@@ -75,6 +100,12 @@ export interface BenchmarkStats {
   p25: number
   p75: number
   confidence: ConfidenceLevel
+  // ── Visualisation data (null when sample_size === 0) ──────────────────────
+  histogram: HistogramBucket[]        // 6–8 buckets covering [min, max]
+  levelBreakdown: BreakdownBar[]      // avg salary per student level, sorted desc
+  curriculumBreakdown: BreakdownBar[] // avg salary per curriculum, sorted desc
+  areaRankings: AreaRanking[]         // top areas by avg, sorted desc
+  sortedSalaries: number[]            // raw sorted salaries for percentile lookup
 }
 
 export interface SiteStats {
@@ -119,8 +150,7 @@ export interface SubmitFormData {
   honeypot: string
 }
 
-// ─── Filter counts: number of approved reports per option value ───────────────
-// Used by FilterSidebar to show "Bangla Medium (150)" style labels.
+// ─── Filter counts ────────────────────────────────────────────────────────────
 export interface FilterCounts {
   areas: Record<string, number>
   subjects: Record<string, number>
