@@ -8,8 +8,9 @@ import { getAuthErrorMessage } from '../../lib/errors'
 import {
   formatBDT, fetchAdminStats, fetchAllRecords, updateRecordFields,
   fetchApprovedOptions, fetchAllPendingItems, updatePendingItem,
+  findAndReplace,
 } from '../../lib/benchmark'
-import type { PendingItemDoc } from '../../lib/benchmark'
+import type { PendingItemDoc, FindReplaceField } from '../../lib/benchmark'
 import { trackAdminLogin, trackAdminLogout } from '../../lib/analytics'
 import { STUDENT_LEVELS, CURRICULUMS, ACADEMIC_YEARS, HOURS_PER_SESSION } from '../../lib/data'
 import type { AdminStats, TuitionRecord, ApprovedOptions } from '../../lib/types'
@@ -247,7 +248,7 @@ function PendingItemModal({
   item, collectionKey, onClose, onSaved,
 }: {
   item: PendingItemDoc
-  collectionKey: string   // 'areas' | 'subjects' | 'universities' | 'departments'
+  collectionKey: string
   onClose: () => void
   onSaved: (updated: PendingItemDoc) => void
 }) {
@@ -263,7 +264,7 @@ function PendingItemModal({
   }, [onClose])
 
   const collectionName = PENDING_COLLECTIONS[collectionKey]
-  const typeLabel = collectionKey.slice(0, -1) // 'areas' → 'area'
+  const typeLabel = collectionKey.slice(0, -1)
 
   const handleSave = async () => {
     if (!draft.value.trim()) { setSaveError('Value cannot be empty.'); return }
@@ -496,7 +497,6 @@ function AllItemsPanel({
 
   useEffect(() => { load() }, [load])
 
-  // Salary records filtered list
   const filteredRecords = records.filter(r => {
     if (statusFilter !== 'all' && r.status !== statusFilter) return false
     if (search.trim()) {
@@ -508,7 +508,6 @@ function AllItemsPanel({
     return true
   })
 
-  // Pending items filtered list
   const filteredItems = pendingItems.filter(item => {
     if (statusFilter !== 'all' && item.status !== statusFilter) return false
     if (search.trim()) return item.value.toLowerCase().includes(search.toLowerCase())
@@ -549,7 +548,6 @@ function AllItemsPanel({
       ) : count === 0 ? (
         <div className="px-5 py-8 text-center text-slate-500 text-sm">No records found</div>
       ) : cfg.isRecord ? (
-        // Salary records list
         <div className="divide-y divide-[#1E3A8A]/30 max-h-[480px] overflow-y-auto">
           {filteredRecords.map(r => (
             <button key={r.id} onClick={() => onViewRecord(r)}
@@ -572,7 +570,6 @@ function AllItemsPanel({
           ))}
         </div>
       ) : (
-        // Pending items list (areas/subjects/universities/departments)
         <div className="divide-y divide-[#1E3A8A]/30 max-h-[480px] overflow-y-auto">
           {filteredItems.map(item => (
             <button key={item.id} onClick={() => onViewPendingItem(item, panelType)}
@@ -597,9 +594,234 @@ function AllItemsPanel({
   )
 }
 
+// ─── Find & Replace Panel ─────────────────────────────────────────────────────
+
+const FIND_REPLACE_FIELDS: { value: FindReplaceField; label: string; description: string }[] = [
+  { value: 'area',        label: 'Areas',        description: 'area field in salary reports + pending_areas' },
+  { value: 'university',  label: 'Universities',  description: 'university field in salary reports + pending_universities' },
+  { value: 'department',  label: 'Departments',   description: 'department field in salary reports + pending_departments' },
+  { value: 'subjects',    label: 'Subjects',      description: 'subjects array in salary reports + pending_subjects' },
+]
+
+function FindReplacePanel() {
+  const [field, setField] = useState<FindReplaceField>('university')
+  const [findValue, setFindValue] = useState('')
+  const [replaceValue, setReplaceValue] = useState('')
+  const [running, setRunning] = useState(false)
+  const [result, setResult] = useState<{ updatedRecords: number; updatedPendingItems: number } | null>(null)
+  const [error, setError] = useState('')
+  const [confirmed, setConfirmed] = useState(false)
+
+  const selectedField = FIND_REPLACE_FIELDS.find(f => f.value === field)!
+
+  const handleRun = async () => {
+    setError('')
+    setResult(null)
+
+    if (!findValue.trim()) { setError('Enter a value to find.'); return }
+    if (!replaceValue.trim()) { setError('Enter a replacement value.'); return }
+    if (findValue.trim().toLowerCase() === replaceValue.trim().toLowerCase()) {
+      setError('Find and replace values are the same.')
+      return
+    }
+    if (!confirmed) { setError('Check the confirmation box before running.'); return }
+
+    setRunning(true)
+    try {
+      const res = await findAndReplace(field, findValue.trim(), replaceValue.trim())
+      setResult(res)
+      setFindValue('')
+      setReplaceValue('')
+      setConfirmed(false)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Operation failed. Please try again.')
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  const handleReset = () => {
+    setFindValue('')
+    setReplaceValue('')
+    setResult(null)
+    setError('')
+    setConfirmed(false)
+  }
+
+  return (
+    <div className="max-w-2xl">
+      {/* Info banner */}
+      <div className="bg-[#1E293B] border border-[#1E3A8A]/40 rounded-2xl p-5 mb-6">
+        <div className="flex items-start gap-3">
+          <div className="w-8 h-8 rounded-lg bg-blue-900/40 border border-blue-700/40 flex items-center justify-center flex-shrink-0 mt-0.5">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#60A5FA" strokeWidth="2">
+              <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+              <path d="M11 8v3M11 14h.01" strokeLinecap="round"/>
+            </svg>
+          </div>
+          <div>
+            <p className="text-white text-sm font-semibold mb-1">Fix duplicate or inconsistent values</p>
+            <p className="text-slate-400 text-xs leading-relaxed">
+              This tool replaces all occurrences of a value across every salary report and its matching option list.
+              Matching is case-insensitive — <span className="text-slate-300">"shahbag"</span>, <span className="text-slate-300">"Shahbag"</span>, and <span className="text-slate-300">"SHAHBAG"</span> are all treated as the same.
+              The replacement is written exactly as you type it.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-[#1E293B] border border-[#1E3A8A]/40 rounded-2xl overflow-hidden">
+        <div className="px-6 py-4 border-b border-[#1E3A8A]/40">
+          <h3 className="text-white font-semibold text-sm">Find &amp; Replace</h3>
+        </div>
+
+        <div className="px-6 py-5 space-y-5">
+          {/* Field selector */}
+          <div>
+            <label className="block text-xs text-slate-400 uppercase tracking-wider mb-2">Field</label>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {FIND_REPLACE_FIELDS.map(f => (
+                <button
+                  key={f.value}
+                  onClick={() => { setField(f.value); handleReset() }}
+                  className={`py-2 px-3 text-xs font-semibold rounded-lg border transition-colors ${
+                    field === f.value
+                      ? 'bg-[#059669] border-[#059669] text-white'
+                      : 'border-[#1E3A8A]/60 text-slate-400 hover:border-slate-500 hover:text-white'
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+            <p className="text-slate-600 text-xs mt-2">Affects: {selectedField.description}</p>
+          </div>
+
+          {/* Find input */}
+          <div>
+            <label className="block text-xs text-slate-400 uppercase tracking-wider mb-2">Find (exact value, case-insensitive)</label>
+            <input
+              type="text"
+              value={findValue}
+              onChange={e => { setFindValue(e.target.value); setResult(null); setError(''); setConfirmed(false) }}
+              placeholder={field === 'university' ? 'e.g. Dhaka University' : field === 'area' ? 'e.g. shahbag' : 'Value to find...'}
+              className="w-full px-3.5 py-2.5 bg-[#0F172A] border border-[#1E3A8A]/40 rounded-lg text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-[#059669]"
+            />
+          </div>
+
+          {/* Replace input */}
+          <div>
+            <label className="block text-xs text-slate-400 uppercase tracking-wider mb-2">Replace with</label>
+            <input
+              type="text"
+              value={replaceValue}
+              onChange={e => { setReplaceValue(e.target.value); setResult(null); setError(''); setConfirmed(false) }}
+              placeholder={field === 'university' ? 'e.g. University of Dhaka' : field === 'area' ? 'e.g. Shahbag' : 'Replacement value...'}
+              className="w-full px-3.5 py-2.5 bg-[#0F172A] border border-[#1E3A8A]/40 rounded-lg text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-[#059669]"
+            />
+          </div>
+
+          {/* Preview */}
+          {findValue.trim() && replaceValue.trim() && (
+            <div className="bg-[#0F172A] border border-[#1E3A8A]/40 rounded-xl px-4 py-3">
+              <p className="text-xs text-slate-500 mb-2 uppercase tracking-wider">Preview</p>
+              <div className="flex items-center gap-3 text-sm">
+                <span className="text-red-400 font-mono bg-red-950/30 px-2 py-0.5 rounded">
+                  &ldquo;{findValue.trim()}&rdquo;
+                </span>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#475569" strokeWidth="2">
+                  <path d="M5 12h14M12 5l7 7-7 7"/>
+                </svg>
+                <span className="text-emerald-400 font-mono bg-emerald-950/30 px-2 py-0.5 rounded">
+                  &ldquo;{replaceValue.trim()}&rdquo;
+                </span>
+              </div>
+              <p className="text-slate-600 text-xs mt-2">
+                in all <span className="text-slate-400">{selectedField.label.toLowerCase()}</span> fields across salary reports and option lists
+              </p>
+            </div>
+          )}
+
+          {/* Confirmation checkbox */}
+          {findValue.trim() && replaceValue.trim() && (
+            <label className="flex items-start gap-3 cursor-pointer select-none">
+              <div className="relative flex-shrink-0 mt-0.5">
+                <input
+                  type="checkbox"
+                  checked={confirmed}
+                  onChange={e => setConfirmed(e.target.checked)}
+                  className="sr-only"
+                />
+                <div
+                  className={`w-4 h-4 rounded border transition-colors ${
+                    confirmed ? 'bg-[#059669] border-[#059669]' : 'border-[#1E3A8A]/60 bg-[#0F172A]'
+                  }`}
+                >
+                  {confirmed && (
+                    <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="white" strokeWidth="2" className="absolute inset-0.5">
+                      <polyline points="2 6 5 9 10 3"/>
+                    </svg>
+                  )}
+                </div>
+              </div>
+              <span className="text-slate-400 text-xs leading-relaxed">
+                I understand this will permanently update all matching records in the database. This action cannot be undone.
+              </span>
+            </label>
+          )}
+
+          {/* Error */}
+          {error && (
+            <p className="text-red-400 text-xs bg-red-950/40 border border-red-900/40 rounded-lg px-3 py-2">
+              {error}
+            </p>
+          )}
+
+          {/* Success result */}
+          {result && (
+            <div className="bg-emerald-950/30 border border-emerald-700/40 rounded-xl px-4 py-3">
+              <div className="flex items-center gap-2 mb-2">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#34D399" strokeWidth="2">
+                  <polyline points="20 6 9 17 4 12"/>
+                </svg>
+                <p className="text-emerald-400 text-sm font-semibold">Replacement complete</p>
+              </div>
+              <div className="space-y-1 text-xs text-slate-400">
+                <p>
+                  <span className="text-white tabular-nums font-semibold">{result.updatedRecords}</span> salary report{result.updatedRecords !== 1 ? 's' : ''} updated
+                </p>
+                <p>
+                  <span className="text-white tabular-nums font-semibold">{result.updatedPendingItems}</span> option list entr{result.updatedPendingItems !== 1 ? 'ies' : 'y'} updated
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Run button */}
+          <button
+            onClick={handleRun}
+            disabled={running || !findValue.trim() || !replaceValue.trim() || !confirmed}
+            className="w-full py-3 bg-[#059669] hover:bg-emerald-500 disabled:opacity-40 text-white font-semibold text-sm rounded-xl transition-colors"
+          >
+            {running ? (
+              <span className="flex items-center justify-center gap-2">
+                <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                </svg>
+                Running...
+              </span>
+            ) : 'Run Find & Replace'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 
-type AdminTab = 'queues' | 'all-records'
+type AdminTab = 'queues' | 'all-records' | 'find-replace'
 
 function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () => void }) {
   const { items, loading, processing, bulkProcessing, approve, reject, approveAll, rejectAll, refresh, refreshAll } = useAdminQueue()
@@ -607,7 +829,6 @@ function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () 
   const [activeTab, setActiveTab] = useState<AdminTab>('queues')
   const [options, setOptions] = useState<ApprovedOptions>({ areas: [], subjects: [], universities: [], departments: [] })
 
-  // Modal state — either a salary record or a pending item
   const [selectedRecord, setSelectedRecord] = useState<(TuitionRecord & { id: string }) | null>(null)
   const [selectedPendingItem, setSelectedPendingItem] = useState<{ item: PendingItemDoc; collectionKey: string } | null>(null)
 
@@ -689,9 +910,13 @@ function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () 
           className={`px-5 py-2 text-sm font-semibold rounded-lg transition-colors ${activeTab === 'all-records' ? 'bg-[#059669] text-white' : 'text-slate-400 hover:text-white'}`}>
           All Records
         </button>
+        <button onClick={() => setActiveTab('find-replace')}
+          className={`px-5 py-2 text-sm font-semibold rounded-lg transition-colors ${activeTab === 'find-replace' ? 'bg-[#059669] text-white' : 'text-slate-400 hover:text-white'}`}>
+          Find &amp; Replace
+        </button>
       </div>
 
-      {/* Moderation Queues tab — 5 panels */}
+      {/* Moderation Queues tab */}
       {activeTab === 'queues' && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
           {queuePanels.map(({ title, queueType }) => (
@@ -715,7 +940,7 @@ function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () 
         </div>
       )}
 
-      {/* All Records tab — 5 panels */}
+      {/* All Records tab */}
       {activeTab === 'all-records' && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
           {allPanels.map(pt => (
@@ -728,6 +953,9 @@ function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () 
           ))}
         </div>
       )}
+
+      {/* Find & Replace tab */}
+      {activeTab === 'find-replace' && <FindReplacePanel />}
 
       {/* Salary record modal */}
       {selectedRecord && (

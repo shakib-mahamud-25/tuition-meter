@@ -8,6 +8,7 @@ import {
   doc,
   serverTimestamp,
   Timestamp,
+  writeBatch,
 } from 'firebase/firestore'
 import { getDb } from './firebase/config'
 import { AREAS, SUBJECTS, UNIVERSITIES, DEPARTMENTS } from './data'
@@ -20,6 +21,7 @@ import type {
   ApprovedOptions,
   TuitionRecord,
   ConfidenceLevel,
+  FilterCounts,
 } from './types'
 
 // ─── Formatting ───────────────────────────────────────────────────────────────
@@ -303,6 +305,53 @@ export async function fetchApprovedOptions(): Promise<ApprovedOptions> {
   }
 }
 
+// ─── Filter counts ────────────────────────────────────────────────────────────
+// Counts how many approved records exist per option value, for use in the
+// benchmark filter sidebar labels (e.g. "Bangla Medium (150)").
+// Uses the same single-query + client-side approach as fetchBenchmarkData.
+
+export async function fetchFilterCounts(): Promise<FilterCounts> {
+  try {
+    const db = await getDb()
+    const snap = await getDocs(
+      query(collection(db, 'tuition_records'), where('status', '==', 'approved'))
+    )
+
+    const areas: Record<string, number> = {}
+    const subjects: Record<string, number> = {}
+    const universities: Record<string, number> = {}
+    const departments: Record<string, number> = {}
+    const curricula: Record<string, number> = {}
+    const student_levels: Record<string, number> = {}
+    const academic_years: Record<string, number> = {}
+    const days_per_week: Record<number, number> = {}
+
+    for (const d of snap.docs) {
+      const r = d.data() as TuitionRecord
+
+      if (r.area) areas[r.area] = (areas[r.area] || 0) + 1
+      if (r.university) universities[r.university] = (universities[r.university] || 0) + 1
+      if (r.department) departments[r.department] = (departments[r.department] || 0) + 1
+      if (r.curriculum) curricula[r.curriculum] = (curricula[r.curriculum] || 0) + 1
+      if (r.student_level) student_levels[r.student_level] = (student_levels[r.student_level] || 0) + 1
+      if (r.academic_year) academic_years[r.academic_year] = (academic_years[r.academic_year] || 0) + 1
+      if (r.days_per_week) days_per_week[r.days_per_week] = (days_per_week[r.days_per_week] || 0) + 1
+      if (Array.isArray(r.subjects)) {
+        for (const s of r.subjects) {
+          subjects[s] = (subjects[s] || 0) + 1
+        }
+      }
+    }
+
+    return { areas, subjects, universities, departments, curricula, student_levels, academic_years, days_per_week }
+  } catch {
+    return {
+      areas: {}, subjects: {}, universities: {}, departments: {},
+      curricula: {}, student_levels: {}, academic_years: {}, days_per_week: {},
+    }
+  }
+}
+
 // ─── Site stats ───────────────────────────────────────────────────────────────
 
 export async function fetchSiteStats(): Promise<SiteStats> {
@@ -421,4 +470,94 @@ export async function updatePendingItem(
 ): Promise<void> {
   const db = await getDb()
   await updateDoc(doc(db, collectionName, id), { ...fields })
+}
+
+// ─── Find & Replace ───────────────────────────────────────────────────────────
+// Replaces all occurrences of `findValue` (case-insensitive) with `replaceValue`
+// across tuition_records AND the corresponding pending_* collection.
+//
+// fieldKey: which field in tuition_records to search ('area' | 'university' |
+//           'department' | 'subjects')
+// pendingCollection: the corresponding pending_* collection name
+//
+// For 'subjects', the field is an array — each element is checked individually.
+// For all other fields, the field is a plain string.
+//
+// Returns the total number of documents updated.
+
+export type FindReplaceField = 'area' | 'university' | 'department' | 'subjects'
+
+const FIELD_TO_PENDING: Record<FindReplaceField, string> = {
+  area: 'pending_areas',
+  university: 'pending_universities',
+  department: 'pending_departments',
+  subjects: 'pending_subjects',
+}
+
+export async function findAndReplace(
+  fieldKey: FindReplaceField,
+  findValue: string,
+  replaceValue: string
+): Promise<{ updatedRecords: number; updatedPendingItems: number }> {
+  const db = await getDb()
+  const findLower = findValue.trim().toLowerCase()
+  const replaceClean = replaceValue.trim()
+
+  if (!findLower || !replaceClean) {
+    throw new Error('Both find and replace values are required.')
+  }
+  if (findLower === replaceClean.toLowerCase()) {
+    throw new Error('Find and replace values are identical.')
+  }
+
+  // ── 1. Update tuition_records ──────────────────────────────────────────────
+  const recordsSnap = await getDocs(collection(db, 'tuition_records'))
+  const recordBatch = writeBatch(db)
+  let updatedRecords = 0
+
+  for (const docSnap of recordsSnap.docs) {
+    const data = docSnap.data() as TuitionRecord
+    const ref = doc(db, 'tuition_records', docSnap.id)
+
+    if (fieldKey === 'subjects') {
+      // Array field: replace matching elements
+      const original = Array.isArray(data.subjects) ? data.subjects : []
+      const updated = original.map(s =>
+        s.toLowerCase() === findLower ? replaceClean : s
+      )
+      const changed = updated.some((s, i) => s !== original[i])
+      if (changed) {
+        recordBatch.update(ref, { subjects: updated })
+        updatedRecords++
+      }
+    } else {
+      // String field: replace if it matches (case-insensitive)
+      const current = (data[fieldKey] as string) || ''
+      if (current.toLowerCase() === findLower) {
+        recordBatch.update(ref, { [fieldKey]: replaceClean })
+        updatedRecords++
+      }
+    }
+  }
+
+  await recordBatch.commit()
+
+  // ── 2. Update corresponding pending_* collection ──────────────────────────
+  const pendingCollection = FIELD_TO_PENDING[fieldKey]
+  const pendingSnap = await getDocs(collection(db, pendingCollection))
+  const pendingBatch = writeBatch(db)
+  let updatedPendingItems = 0
+
+  for (const docSnap of pendingSnap.docs) {
+    const data = docSnap.data() as { value: string }
+    if ((data.value || '').toLowerCase() === findLower) {
+      const ref = doc(db, pendingCollection, docSnap.id)
+      pendingBatch.update(ref, { value: replaceClean })
+      updatedPendingItems++
+    }
+  }
+
+  await pendingBatch.commit()
+
+  return { updatedRecords, updatedPendingItems }
 }

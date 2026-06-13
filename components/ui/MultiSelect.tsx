@@ -4,6 +4,10 @@ import { useState, useRef, useEffect, KeyboardEvent } from 'react'
 
 interface MultiSelectProps {
   options: string[]
+  // Optional parallel array of raw values for each option label.
+  // When provided: options[i] is the display label, valueOptions[i] is the stored value.
+  // When omitted: options are used as both label and value (existing behaviour).
+  valueOptions?: string[]
   value: string[]
   onChange: (value: string[]) => void
   placeholder?: string
@@ -16,6 +20,7 @@ interface MultiSelectProps {
 
 export function MultiSelect({
   options,
+  valueOptions,
   value,
   onChange,
   placeholder = 'Search subjects...',
@@ -32,9 +37,16 @@ export function MultiSelect({
   const containerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const available = options.filter(
-    o => !value.includes(o) && o.toLowerCase().includes(query.toLowerCase())
+  // Build paired label/value list, filtering out already-selected raw values
+  const allPaired = options.map((lbl, i) => ({
+    label: lbl,
+    rawValue: valueOptions ? valueOptions[i] : lbl,
+  }))
+
+  const available = allPaired.filter(
+    o => !value.includes(o.rawValue) && o.label.toLowerCase().includes(query.toLowerCase())
   )
+
   const exactMatch = options.some(o => o.toLowerCase() === query.toLowerCase())
   const showAddNew = allowCustom && query.trim().length > 1 && !exactMatch && !value.includes(query.trim())
 
@@ -46,15 +58,22 @@ export function MultiSelect({
     return () => document.removeEventListener('mousedown', handleClick)
   }, [])
 
-  const addItem = (item: string) => {
-    onChange([...value, item])
+  const addItem = (rawValue: string) => {
+    onChange([...value, rawValue])
     setQuery('')
     setHighlighted(0)
     inputRef.current?.focus()
   }
 
-  const removeItem = (item: string) => {
-    onChange(value.filter(v => v !== item))
+  const removeItem = (rawValue: string) => {
+    onChange(value.filter(v => v !== rawValue))
+  }
+
+  // Get display label for a raw value
+  const getLabel = (rawValue: string): string => {
+    if (!valueOptions) return rawValue
+    const idx = valueOptions.indexOf(rawValue)
+    return idx !== -1 ? options[idx] : rawValue
   }
 
   const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
@@ -68,7 +87,7 @@ export function MultiSelect({
     } else if (e.key === 'Enter') {
       e.preventDefault()
       if (highlighted < available.length && available[highlighted]) {
-        addItem(available[highlighted])
+        addItem(available[highlighted].rawValue)
       } else if (showAddNew && onAddNew) {
         handleAddNew()
       }
@@ -109,11 +128,11 @@ export function MultiSelect({
             key={v}
             className="inline-flex items-center gap-1 px-2.5 py-1 bg-[#D1FAE5] text-[#059669] text-xs font-semibold rounded-md"
           >
-            {v}
+            {getLabel(v)}
             <button
               type="button"
               onClick={e => { e.stopPropagation(); removeItem(v) }}
-              aria-label={`Remove ${v}`}
+              aria-label={`Remove ${getLabel(v)}`}
               className="text-emerald-600 hover:text-emerald-800 focus:outline-none"
             >
               ×
@@ -144,16 +163,16 @@ export function MultiSelect({
         >
           {available.map((opt, i) => (
             <li
-              key={opt}
+              key={opt.rawValue}
               role="option"
               aria-selected={false}
               className={`px-3.5 py-2.5 text-sm cursor-pointer transition-colors ${
                 i === highlighted ? 'bg-emerald-50 text-[#059669]' : 'text-slate-700 hover:bg-slate-50'
               }`}
-              onMouseDown={() => addItem(opt)}
+              onMouseDown={() => addItem(opt.rawValue)}
               onMouseEnter={() => setHighlighted(i)}
             >
-              {opt}
+              {opt.label}
             </li>
           ))}
           {showAddNew && (

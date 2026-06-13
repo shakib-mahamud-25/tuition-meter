@@ -118,3 +118,16 @@ export interface SubmitFormData {
   academic_year: AcademicYear | ''
   honeypot: string
 }
+
+// ─── Filter counts: number of approved reports per option value ───────────────
+// Used by FilterSidebar to show "Bangla Medium (150)" style labels.
+export interface FilterCounts {
+  areas: Record<string, number>
+  subjects: Record<string, number>
+  universities: Record<string, number>
+  departments: Record<string, number>
+  curricula: Record<string, number>
+  student_levels: Record<string, number>
+  academic_years: Record<string, number>
+  days_per_week: Record<number, number>
+}

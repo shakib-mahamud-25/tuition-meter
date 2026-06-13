@@ -4,6 +4,10 @@ import { useState, useRef, useEffect, useCallback, KeyboardEvent } from 'react'
 
 interface SearchableSelectProps {
   options: string[]
+  // Optional parallel array of raw values for each option label.
+  // When provided: options[i] is the display label, valueOptions[i] is the stored value.
+  // When omitted: options are used as both label and value (existing behaviour).
+  valueOptions?: string[]
   value: string
   onChange: (value: string) => void
   placeholder?: string
@@ -17,6 +21,7 @@ interface SearchableSelectProps {
 
 export function SearchableSelect({
   options,
+  valueOptions,
   value,
   onChange,
   placeholder = 'Search or select...',
@@ -34,9 +39,10 @@ export function SearchableSelect({
   const containerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const filtered = options.filter(o =>
-    o.toLowerCase().includes(query.toLowerCase())
-  )
+  const filtered = options
+    .map((label, i) => ({ label, rawValue: valueOptions ? valueOptions[i] : label }))
+    .filter(o => o.label.toLowerCase().includes(query.toLowerCase()))
+
   const exactMatch = options.some(o => o.toLowerCase() === query.toLowerCase())
   const showAddNew = allowCustom && query.trim().length > 1 && !exactMatch
 
@@ -52,9 +58,9 @@ export function SearchableSelect({
     return () => document.removeEventListener('mousedown', handleClick)
   }, [])
 
-  const selectOption = useCallback((opt: string) => {
-    onChange(opt)
-    setQuery(opt)
+  const selectOption = useCallback((displayLabel: string, rawValue: string) => {
+    onChange(rawValue)
+    setQuery(displayLabel)
     setOpen(false)
     setHighlighted(0)
   }, [onChange])
@@ -70,7 +76,8 @@ export function SearchableSelect({
     } else if (e.key === 'Enter') {
       e.preventDefault()
       if (highlighted < filtered.length) {
-        selectOption(filtered[highlighted])
+        const opt = filtered[highlighted]
+        selectOption(opt.label, opt.rawValue)
       } else if (showAddNew && onAddNew) {
         handleAddNew()
       }
@@ -126,16 +133,16 @@ export function SearchableSelect({
         >
           {filtered.map((opt, i) => (
             <li
-              key={opt}
+              key={opt.rawValue}
               role="option"
-              aria-selected={opt === value}
+              aria-selected={opt.rawValue === value}
               className={`px-3.5 py-2.5 text-sm cursor-pointer transition-colors ${
                 i === highlighted ? 'bg-emerald-50 text-[#059669]' : 'text-slate-700 hover:bg-slate-50'
-              } ${opt === value ? 'font-semibold text-[#059669]' : ''}`}
-              onMouseDown={() => selectOption(opt)}
+              } ${opt.rawValue === value ? 'font-semibold text-[#059669]' : ''}`}
+              onMouseDown={() => selectOption(opt.label, opt.rawValue)}
               onMouseEnter={() => setHighlighted(i)}
             >
-              {opt}
+              {opt.label}
             </li>
           ))}
           {showAddNew && (
