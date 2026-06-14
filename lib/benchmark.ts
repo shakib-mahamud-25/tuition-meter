@@ -833,7 +833,7 @@ export async function editFieldValue(
         updatedRecords++
       }
     } else {
-      const current = ((data as Record<string, unknown>)[MANAGED_FIELD_TO_RECORD_KEY[fieldKey]] as string) || ''
+      const current = ((data as unknown as Record<string, unknown>)[MANAGED_FIELD_TO_RECORD_KEY[fieldKey]] as string) || ''
       if (current.toLowerCase() === oldLower) {
         batch.update(ref, { [MANAGED_FIELD_TO_RECORD_KEY[fieldKey]]: newClean })
         updatedRecords++
@@ -878,7 +878,7 @@ export async function deleteFieldValue(
         updatedRecords++
       }
     } else {
-      const current = ((data as Record<string, unknown>)[MANAGED_FIELD_TO_RECORD_KEY[fieldKey]] as string) || ''
+      const current = ((data as unknown as Record<string, unknown>)[MANAGED_FIELD_TO_RECORD_KEY[fieldKey]] as string) || ''
       if (current.toLowerCase() === valueLower) {
         recordBatch.update(ref, { [MANAGED_FIELD_TO_RECORD_KEY[fieldKey]]: '' })
         updatedRecords++
