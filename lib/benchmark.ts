@@ -150,6 +150,11 @@ export async function fetchBenchmarkData(
       p25: 0,
       p75: 0,
       confidence: 'low',
+      histogram: [],
+      levelBreakdown: [],
+      curriculumBreakdown: [],
+      areaRankings: [],
+      sortedSalaries: [],
     }
   }
 
