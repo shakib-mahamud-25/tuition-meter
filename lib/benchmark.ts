@@ -389,10 +389,6 @@ export async function rejectAllInQueue(
 }
 
 // ─── Fetch approved options ───────────────────────────────────────────────────
-// Reads ONLY from Firestore pending_* collections (status == 'approved').
-// After running seedOptionLists() once, the static lib/data.ts arrays are no
-// longer needed as a source — Firestore is the single source of truth.
-// Falls back to static arrays only if Firestore is completely unreachable.
 
 export async function fetchApprovedOptions(): Promise<ApprovedOptions> {
   try {
@@ -403,92 +399,24 @@ export async function fetchApprovedOptions(): Promise<ApprovedOptions> {
       getDocs(query(collection(db, 'pending_universities'), where('status', '==', 'approved'))),
       getDocs(query(collection(db, 'pending_departments'), where('status', '==', 'approved'))),
     ])
-    const toSorted = (snap: typeof areasSnap) =>
-      snap.docs.map(d => (d.data() as { value: string }).value).sort()
+    const merge = (base: string[], snap: typeof areasSnap) => {
+      const extra = snap.docs.map(d => (d.data() as { value: string }).value)
+      return [...new Set([...base, ...extra])].sort()
+    }
     return {
-      areas:       toSorted(areasSnap),
-      subjects:    toSorted(subjectsSnap),
-      universities: toSorted(unisSnap),
-      departments: toSorted(deptsSnap),
+      areas: merge(AREAS, areasSnap),
+      subjects: merge(SUBJECTS, subjectsSnap),
+      universities: merge(UNIVERSITIES, unisSnap),
+      departments: merge(DEPARTMENTS, deptsSnap),
     }
   } catch {
-    // Firestore unreachable — emergency fallback to static lists
     return {
-      areas:        [...AREAS].sort(),
-      subjects:     [...SUBJECTS].sort(),
+      areas: [...AREAS].sort(),
+      subjects: [...SUBJECTS].sort(),
       universities: [...UNIVERSITIES].sort(),
-      departments:  [...DEPARTMENTS].sort(),
+      departments: [...DEPARTMENTS].sort(),
     }
   }
-}
-
-// ─── Seed option lists from static defaults ───────────────────────────────────
-// ONE-TIME operation. Writes every value from lib/data.ts into the corresponding
-// pending_* Firestore collection with status: 'approved', skipping any value
-// that already exists (case-insensitive match).
-//
-// After this runs, the Field Values panel shows and manages everything —
-// preloaded and custom — from a single place.
-//
-// Returns counts of how many were written vs skipped per collection.
-
-export interface SeedResult {
-  areas:        { written: number; skipped: number }
-  subjects:     { written: number; skipped: number }
-  universities: { written: number; skipped: number }
-  departments:  { written: number; skipped: number }
-}
-
-export async function seedOptionLists(): Promise<SeedResult> {
-  const db = await getDb()
-
-  const collections: Array<{
-    name: string
-    key: keyof SeedResult
-    values: string[]
-  }> = [
-    { name: 'pending_areas',        key: 'areas',        values: AREAS },
-    { name: 'pending_subjects',     key: 'subjects',     values: SUBJECTS },
-    { name: 'pending_universities', key: 'universities', values: UNIVERSITIES },
-    { name: 'pending_departments',  key: 'departments',  values: DEPARTMENTS },
-  ]
-
-  const result: SeedResult = {
-    areas:        { written: 0, skipped: 0 },
-    subjects:     { written: 0, skipped: 0 },
-    universities: { written: 0, skipped: 0 },
-    departments:  { written: 0, skipped: 0 },
-  }
-
-  for (const col of collections) {
-    // Fetch existing values in this collection
-    const snap = await getDocs(collection(db, col.name))
-    const existingLower = new Set(
-      snap.docs.map(d => ((d.data() as { value: string }).value || '').toLowerCase())
-    )
-
-    // Write in batches of 500 (Firestore writeBatch limit)
-    const toWrite = col.values.filter(v => !existingLower.has(v.toLowerCase()))
-    result[col.key].skipped = col.values.length - toWrite.length
-
-    const BATCH_SIZE = 499
-    for (let i = 0; i < toWrite.length; i += BATCH_SIZE) {
-      const batch = writeBatch(db)
-      const chunk = toWrite.slice(i, i + BATCH_SIZE)
-      for (const value of chunk) {
-        const ref = doc(collection(db, col.name))
-        batch.set(ref, {
-          value,
-          status: 'approved',
-          submitted_at: serverTimestamp(),
-        })
-      }
-      await batch.commit()
-      result[col.key].written += chunk.length
-    }
-  }
-
-  return result
 }
 
 // ─── Filter counts ────────────────────────────────────────────────────────────
@@ -833,7 +761,7 @@ export async function editFieldValue(
         updatedRecords++
       }
     } else {
-      const current = ((data as unknown as Record<string, unknown>)[MANAGED_FIELD_TO_RECORD_KEY[fieldKey]] as string) || ''
+      const current = (data[MANAGED_FIELD_TO_RECORD_KEY[fieldKey]] as string) || ''
       if (current.toLowerCase() === oldLower) {
         batch.update(ref, { [MANAGED_FIELD_TO_RECORD_KEY[fieldKey]]: newClean })
         updatedRecords++
@@ -878,7 +806,7 @@ export async function deleteFieldValue(
         updatedRecords++
       }
     } else {
-      const current = ((data as unknown as Record<string, unknown>)[MANAGED_FIELD_TO_RECORD_KEY[fieldKey]] as string) || ''
+      const current = (data[MANAGED_FIELD_TO_RECORD_KEY[fieldKey]] as string) || ''
       if (current.toLowerCase() === valueLower) {
         recordBatch.update(ref, { [MANAGED_FIELD_TO_RECORD_KEY[fieldKey]]: '' })
         updatedRecords++

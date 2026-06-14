@@ -8,7 +8,7 @@ import { getAuthErrorMessage } from '../../lib/errors'
 import {
   formatBDT, fetchAdminStats, fetchAllRecords, updateRecordFields,
   fetchApprovedOptions, fetchAllPendingItems, updatePendingItem,
-  findAndReplace, fetchAllFieldValues, editFieldValue, deleteFieldValue, seedOptionLists,
+  findAndReplace, fetchAllFieldValues, editFieldValue, deleteFieldValue,
 } from '../../lib/benchmark'
 import type { PendingItemDoc, FindReplaceField, ManagedField, FieldValueEntry } from '../../lib/benchmark'
 import { trackAdminLogin, trackAdminLogout } from '../../lib/analytics'
@@ -903,27 +903,6 @@ function FieldValuesPanel() {
     } finally { setBusy(false) }
   }
 
-  // ── Seed state ──────────────────────────────────────────────────────────────
-  const [seeding, setSeeding] = useState(false)
-  const [seedResult, setSeedResult] = useState<{ total: number; skipped: number } | null>(null)
-  const [seedError, setSeedError] = useState('')
-  const [seedConfirmed, setSeedConfirmed] = useState(false)
-
-  const handleSeed = async () => {
-    if (!seedConfirmed) { setSeedError('Check the confirmation box first.'); return }
-    setSeeding(true); setSeedError(''); setSeedResult(null)
-    try {
-      const res = await seedOptionLists()
-      const total = res.areas.written + res.subjects.written + res.universities.written + res.departments.written
-      const skipped = res.areas.skipped + res.subjects.skipped + res.universities.skipped + res.departments.skipped
-      setSeedResult({ total, skipped })
-      setSeedConfirmed(false)
-      await load()
-    } catch (e) {
-      setSeedError(e instanceof Error ? e.message : 'Seeding failed.')
-    } finally { setSeeding(false) }
-  }
-
   const currentList = allValues ? allValues[activeField] : []
   const filtered = currentList.filter(e =>
     e.value.toLowerCase().includes(search.toLowerCase())
@@ -938,7 +917,7 @@ function FieldValuesPanel() {
   return (
     <div className="max-w-2xl">
       {/* Info banner */}
-      <div className="bg-[#1E293B] border border-[#1E3A8A]/40 rounded-2xl p-5 mb-4">
+      <div className="bg-[#1E293B] border border-[#1E3A8A]/40 rounded-2xl p-5 mb-6">
         <div className="flex items-start gap-3">
           <div className="w-8 h-8 rounded-lg bg-blue-900/40 border border-blue-700/40 flex items-center justify-center flex-shrink-0 mt-0.5">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#60A5FA" strokeWidth="2">
@@ -954,74 +933,6 @@ function FieldValuesPanel() {
             </p>
           </div>
         </div>
-      </div>
-
-      {/* ── Seed Option Lists ── one-time migration ──────────────────────────── */}
-      <div className="bg-[#1E293B] border border-amber-700/30 rounded-2xl p-5 mb-6">
-        <div className="flex items-start gap-3 mb-4">
-          <div className="w-8 h-8 rounded-lg bg-amber-900/40 border border-amber-700/40 flex items-center justify-center flex-shrink-0 mt-0.5">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#FCD34D" strokeWidth="2">
-              <ellipse cx="12" cy="5" rx="9" ry="3"/>
-              <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
-              <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
-            </svg>
-          </div>
-          <div>
-            <p className="text-white text-sm font-semibold mb-1">Seed option lists from defaults</p>
-            <p className="text-slate-400 text-xs leading-relaxed">
-              One-time operation. Writes all preloaded areas, subjects, universities and departments
-              from the codebase into Firestore so they appear here and can be managed.
-              Already-existing values are skipped automatically.
-            </p>
-          </div>
-        </div>
-
-        {seedResult && (
-          <div className="bg-emerald-950/30 border border-emerald-700/40 rounded-xl px-4 py-3 mb-4">
-            <p className="text-emerald-400 text-xs font-semibold mb-0.5">Seeding complete</p>
-            <p className="text-slate-400 text-xs">
-              {seedResult.total} value{seedResult.total !== 1 ? 's' : ''} written &middot; {seedResult.skipped} already existed and were skipped
-            </p>
-          </div>
-        )}
-
-        {seedError && (
-          <div className="bg-red-950/40 border border-red-900/40 rounded-xl px-4 py-3 mb-4">
-            <p className="text-red-400 text-xs">{seedError}</p>
-          </div>
-        )}
-
-        <label className="flex items-start gap-3 cursor-pointer select-none mb-4">
-          <div className="relative flex-shrink-0 mt-0.5">
-            <input type="checkbox" checked={seedConfirmed} onChange={e => { setSeedConfirmed(e.target.checked); setSeedError('') }} className="sr-only"/>
-            <div className={`w-4 h-4 rounded border transition-colors ${seedConfirmed ? 'bg-[#059669] border-[#059669]' : 'border-[#1E3A8A]/60 bg-[#0F172A]'}`}>
-              {seedConfirmed && (
-                <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="white" strokeWidth="2" className="absolute inset-0.5">
-                  <polyline points="2 6 5 9 10 3"/>
-                </svg>
-              )}
-            </div>
-          </div>
-          <span className="text-slate-400 text-xs leading-relaxed">
-            I understand this writes the default option lists to Firestore. Safe to run multiple times — duplicates are skipped.
-          </span>
-        </label>
-
-        <button
-          onClick={handleSeed}
-          disabled={seeding || !seedConfirmed}
-          className="px-5 py-2.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
-        >
-          {seeding ? (
-            <span className="flex items-center gap-2">
-              <svg className="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-              </svg>
-              Seeding...
-            </span>
-          ) : 'Seed Option Lists'}
-        </button>
       </div>
 
       <div className="bg-[#1E293B] border border-[#1E3A8A]/40 rounded-2xl overflow-hidden">
@@ -1061,7 +972,7 @@ function FieldValuesPanel() {
         {successMsg && (
           <div className="mx-5 mt-4 bg-emerald-950/30 border border-emerald-700/40 rounded-xl px-4 py-3 flex items-center justify-between">
             <p className="text-emerald-400 text-xs font-medium">{successMsg}</p>
-            <button onClick={() => setSuccessMsg('')} className="text-slate-500 hover:text-white text-lg leading-none ml-4">×</button>
+            <button onClick={() => setSuccessMsg('\')} className="text-slate-500 hover:text-white text-lg leading-none ml-4">×</button>
           </div>
         )}
 
