@@ -8,9 +8,9 @@ import { getAuthErrorMessage } from '../../lib/errors'
 import {
   formatBDT, fetchAdminStats, fetchAllRecords, updateRecordFields,
   fetchApprovedOptions, fetchAllPendingItems, updatePendingItem,
-  findAndReplace,
+  findAndReplace, fetchActiveFieldValues, deleteFieldValue,
 } from '../../lib/benchmark'
-import type { PendingItemDoc, FindReplaceField } from '../../lib/benchmark'
+import type { PendingItemDoc, FindReplaceField, ManagedField, FieldValueEntry } from '../../lib/benchmark'
 import { trackAdminLogin, trackAdminLogout } from '../../lib/analytics'
 import { STUDENT_LEVELS, CURRICULUMS, ACADEMIC_YEARS, HOURS_PER_SESSION } from '../../lib/data'
 import type { AdminStats, TuitionRecord, ApprovedOptions } from '../../lib/types'
@@ -819,9 +819,224 @@ function FindReplacePanel() {
   )
 }
 
+// ─── Field Values Panel ──────────────────────────────────────────────────────
+// Shows all distinct values currently active in approved records for each
+// managed field. Admin can delete any value — this scrubs it from all records
+// and removes it from the pending_* option list.
+
+const FIELD_VALUE_TABS: { key: ManagedField; label: string }[] = [
+  { key: 'area',        label: 'Areas' },
+  { key: 'university',  label: 'Universities' },
+  { key: 'department',  label: 'Departments' },
+  { key: 'subjects',    label: 'Subjects' },
+]
+
+function FieldValuesPanel() {
+  const [activeField, setActiveField] = useState<ManagedField>('university')
+  const [allValues, setAllValues] = useState<Record<ManagedField, FieldValueEntry[]> | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [search, setSearch] = useState('')
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
+  const [deleteResult, setDeleteResult] = useState<{ value: string; updatedRecords: number; deletedPendingItems: number } | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const data = await fetchActiveFieldValues()
+      setAllValues(data)
+    } catch { /* silent */ }
+    finally { setLoading(false) }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const currentList = allValues ? allValues[activeField] : []
+  const filtered = currentList.filter(e =>
+    e.value.toLowerCase().includes(search.toLowerCase())
+  )
+
+  const handleDeleteConfirm = async () => {
+    if (!pendingDelete) return
+    setDeleting(true)
+    setDeleteError('')
+    try {
+      const result = await deleteFieldValue(activeField, pendingDelete)
+      setDeleteResult({ value: pendingDelete, ...result })
+      setPendingDelete(null)
+      await load()
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : 'Delete failed.')
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  const resetDelete = () => { setPendingDelete(null); setDeleteError('') }
+
+  return (
+    <div className="max-w-2xl">
+      {/* Info banner */}
+      <div className="bg-[#1E293B] border border-[#1E3A8A]/40 rounded-2xl p-5 mb-6">
+        <div className="flex items-start gap-3">
+          <div className="w-8 h-8 rounded-lg bg-red-900/40 border border-red-700/40 flex items-center justify-center flex-shrink-0 mt-0.5">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#F87171" strokeWidth="2">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6l-1 14H6L5 6"/>
+              <path d="M10 11v6M14 11v6"/>
+              <path d="M9 6V4h6v2"/>
+            </svg>
+          </div>
+          <div>
+            <p className="text-white text-sm font-semibold mb-1">Manage active field values</p>
+            <p className="text-slate-400 text-xs leading-relaxed">
+              Shows every distinct value currently in use across approved salary reports.
+              Deleting a value removes it from all records and the option dropdown permanently.
+              Use <span className="text-slate-300">Find &amp; Replace</span> first if you want
+              to reassign records to a different value instead.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-[#1E293B] border border-[#1E3A8A]/40 rounded-2xl overflow-hidden">
+        {/* Field type selector */}
+        <div className="flex border-b border-[#1E3A8A]/40">
+          {FIELD_VALUE_TABS.map(tab => (
+            <button
+              key={tab.key}
+              onClick={() => { setActiveField(tab.key); setSearch(''); setDeleteResult(null); setDeleteError(''); setPendingDelete(null) }}
+              className={`flex-1 py-3 text-xs font-semibold transition-colors border-r border-[#1E3A8A]/40 last:border-r-0 ${
+                activeField === tab.key
+                  ? 'bg-[#0F172A] text-white'
+                  : 'text-slate-400 hover:text-white hover:bg-white/5'
+              }`}
+            >
+              {tab.label}
+              {allValues && (
+                <span className="ml-1.5 text-slate-500 font-normal">({allValues[tab.key].length})</span>
+              )}
+            </button>
+          ))}
+        </div>
+
+        {/* Search + refresh */}
+        <div className="px-5 py-4 border-b border-[#1E3A8A]/40 flex gap-2">
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder={`Search ${FIELD_VALUE_TABS.find(t => t.key === activeField)?.label.toLowerCase()}...`}
+            className="flex-1 px-3 py-2 bg-[#0F172A] border border-[#1E3A8A]/40 rounded-lg text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-[#059669]"
+          />
+          <button onClick={load} disabled={loading}
+            className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-50">
+            {loading ? '...' : '↻'}
+          </button>
+        </div>
+
+        {/* Success banner */}
+        {deleteResult && (
+          <div className="mx-5 mt-4 bg-emerald-950/30 border border-emerald-700/40 rounded-xl px-4 py-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-emerald-400 text-xs font-semibold mb-1">&ldquo;{deleteResult.value}&rdquo; deleted</p>
+                <p className="text-slate-400 text-xs">
+                  {deleteResult.updatedRecords} record{deleteResult.updatedRecords !== 1 ? 's' : ''} updated &middot;{' '}
+                  {deleteResult.deletedPendingItems} option entr{deleteResult.deletedPendingItems !== 1 ? 'ies' : 'y'} removed
+                </p>
+              </div>
+              <button onClick={() => setDeleteResult(null)} className="text-slate-500 hover:text-white text-lg leading-none ml-4">×</button>
+            </div>
+          </div>
+        )}
+
+        {/* Error banner */}
+        {deleteError && (
+          <div className="mx-5 mt-4 bg-red-950/40 border border-red-900/40 rounded-xl px-4 py-3 flex items-center justify-between">
+            <p className="text-red-400 text-xs">{deleteError}</p>
+            <button onClick={() => setDeleteError('')} className="text-slate-500 hover:text-white text-lg leading-none ml-4">×</button>
+          </div>
+        )}
+
+        {/* Inline delete confirmation */}
+        {pendingDelete && (
+          <div className="mx-5 mt-4 bg-red-950/30 border border-red-800/50 rounded-xl px-4 py-4">
+            <p className="text-white text-sm font-semibold mb-1">Delete &ldquo;{pendingDelete}&rdquo;?</p>
+            <p className="text-slate-400 text-xs mb-4 leading-relaxed">
+              This will remove this value from all salary records and the option list. This cannot be undone.
+            </p>
+            <div className="flex gap-2">
+              <button onClick={handleDeleteConfirm} disabled={deleting}
+                className="px-4 py-2 bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors">
+                {deleting ? (
+                  <span className="flex items-center gap-1.5">
+                    <svg className="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                    </svg>
+                    Deleting...
+                  </span>
+                ) : 'Yes, delete'}
+              </button>
+              <button onClick={resetDelete} disabled={deleting}
+                className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-50">
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Value list */}
+        {loading ? (
+          <div className="px-5 py-10 text-center text-slate-500 text-sm">Loading...</div>
+        ) : filtered.length === 0 ? (
+          <div className="px-5 py-10 text-center text-slate-500 text-sm">
+            {search ? 'No values match your search.' : 'No active values found.'}
+          </div>
+        ) : (
+          <div className="divide-y divide-[#1E3A8A]/30 max-h-[480px] overflow-y-auto">
+            {filtered.map(entry => {
+              const isPending = pendingDelete === entry.value
+              return (
+                <div key={entry.value}
+                  className={`flex items-center justify-between px-5 py-3.5 transition-colors ${isPending ? 'bg-red-950/20' : 'hover:bg-white/5'}`}>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-white text-sm font-medium truncate">{entry.value}</p>
+                    <p className="text-slate-500 text-xs mt-0.5">
+                      {entry.count} approved report{entry.count !== 1 ? 's' : ''}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => { setDeleteResult(null); setDeleteError(''); setPendingDelete(isPending ? null : entry.value) }}
+                    className={`ml-4 flex-shrink-0 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+                      isPending
+                        ? 'bg-red-600 border-red-600 text-white'
+                        : 'border-red-900/50 text-red-400 hover:bg-red-950/40 hover:border-red-700'
+                    }`}>
+                    {isPending ? 'Confirming...' : 'Delete'}
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
+        {!loading && filtered.length > 0 && (
+          <div className="px-5 py-3 border-t border-[#1E3A8A]/40">
+            <p className="text-xs text-slate-600">
+              {filtered.length} value{filtered.length !== 1 ? 's' : ''}{search ? ` matching "${search}"` : ' total'}
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 
-type AdminTab = 'queues' | 'all-records' | 'find-replace'
+type AdminTab = 'queues' | 'all-records' | 'find-replace' | 'field-values'
 
 function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () => void }) {
   const { items, loading, processing, bulkProcessing, approve, reject, approveAll, rejectAll, refresh, refreshAll } = useAdminQueue()
@@ -914,6 +1129,10 @@ function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () 
           className={`px-5 py-2 text-sm font-semibold rounded-lg transition-colors ${activeTab === 'find-replace' ? 'bg-[#059669] text-white' : 'text-slate-400 hover:text-white'}`}>
           Find &amp; Replace
         </button>
+        <button onClick={() => setActiveTab('field-values')}
+          className={`px-5 py-2 text-sm font-semibold rounded-lg transition-colors ${activeTab === 'field-values' ? 'bg-[#059669] text-white' : 'text-slate-400 hover:text-white'}`}>
+          Field Values
+        </button>
       </div>
 
       {/* Moderation Queues tab */}
@@ -956,6 +1175,9 @@ function Dashboard({ userEmail, onSignOut }: { userEmail: string; onSignOut: () 
 
       {/* Find & Replace tab */}
       {activeTab === 'find-replace' && <FindReplacePanel />}
+
+      {/* Field Values tab */}
+      {activeTab === 'field-values' && <FieldValuesPanel />}
 
       {/* Salary record modal */}
       {selectedRecord && (
