@@ -5,6 +5,7 @@ import {
   getDocs,
   addDoc,
   updateDoc,
+  deleteDoc,
   doc,
   serverTimestamp,
   Timestamp,
@@ -388,6 +389,10 @@ export async function rejectAllInQueue(
 }
 
 // ─── Fetch approved options ───────────────────────────────────────────────────
+// Reads ONLY from Firestore pending_* collections (status == 'approved').
+// After running seedOptionLists() once, the static lib/data.ts arrays are no
+// longer needed as a source — Firestore is the single source of truth.
+// Falls back to static arrays only if Firestore is completely unreachable.
 
 export async function fetchApprovedOptions(): Promise<ApprovedOptions> {
   try {
@@ -398,24 +403,92 @@ export async function fetchApprovedOptions(): Promise<ApprovedOptions> {
       getDocs(query(collection(db, 'pending_universities'), where('status', '==', 'approved'))),
       getDocs(query(collection(db, 'pending_departments'), where('status', '==', 'approved'))),
     ])
-    const merge = (base: string[], snap: typeof areasSnap) => {
-      const extra = snap.docs.map(d => (d.data() as { value: string }).value)
-      return [...new Set([...base, ...extra])].sort()
-    }
+    const toSorted = (snap: typeof areasSnap) =>
+      snap.docs.map(d => (d.data() as { value: string }).value).sort()
     return {
-      areas: merge(AREAS, areasSnap),
-      subjects: merge(SUBJECTS, subjectsSnap),
-      universities: merge(UNIVERSITIES, unisSnap),
-      departments: merge(DEPARTMENTS, deptsSnap),
+      areas:       toSorted(areasSnap),
+      subjects:    toSorted(subjectsSnap),
+      universities: toSorted(unisSnap),
+      departments: toSorted(deptsSnap),
     }
   } catch {
+    // Firestore unreachable — emergency fallback to static lists
     return {
-      areas: [...AREAS].sort(),
-      subjects: [...SUBJECTS].sort(),
+      areas:        [...AREAS].sort(),
+      subjects:     [...SUBJECTS].sort(),
       universities: [...UNIVERSITIES].sort(),
-      departments: [...DEPARTMENTS].sort(),
+      departments:  [...DEPARTMENTS].sort(),
     }
   }
+}
+
+// ─── Seed option lists from static defaults ───────────────────────────────────
+// ONE-TIME operation. Writes every value from lib/data.ts into the corresponding
+// pending_* Firestore collection with status: 'approved', skipping any value
+// that already exists (case-insensitive match).
+//
+// After this runs, the Field Values panel shows and manages everything —
+// preloaded and custom — from a single place.
+//
+// Returns counts of how many were written vs skipped per collection.
+
+export interface SeedResult {
+  areas:        { written: number; skipped: number }
+  subjects:     { written: number; skipped: number }
+  universities: { written: number; skipped: number }
+  departments:  { written: number; skipped: number }
+}
+
+export async function seedOptionLists(): Promise<SeedResult> {
+  const db = await getDb()
+
+  const collections: Array<{
+    name: string
+    key: keyof SeedResult
+    values: string[]
+  }> = [
+    { name: 'pending_areas',        key: 'areas',        values: AREAS },
+    { name: 'pending_subjects',     key: 'subjects',     values: SUBJECTS },
+    { name: 'pending_universities', key: 'universities', values: UNIVERSITIES },
+    { name: 'pending_departments',  key: 'departments',  values: DEPARTMENTS },
+  ]
+
+  const result: SeedResult = {
+    areas:        { written: 0, skipped: 0 },
+    subjects:     { written: 0, skipped: 0 },
+    universities: { written: 0, skipped: 0 },
+    departments:  { written: 0, skipped: 0 },
+  }
+
+  for (const col of collections) {
+    // Fetch existing values in this collection
+    const snap = await getDocs(collection(db, col.name))
+    const existingLower = new Set(
+      snap.docs.map(d => ((d.data() as { value: string }).value || '').toLowerCase())
+    )
+
+    // Write in batches of 500 (Firestore writeBatch limit)
+    const toWrite = col.values.filter(v => !existingLower.has(v.toLowerCase()))
+    result[col.key].skipped = col.values.length - toWrite.length
+
+    const BATCH_SIZE = 499
+    for (let i = 0; i < toWrite.length; i += BATCH_SIZE) {
+      const batch = writeBatch(db)
+      const chunk = toWrite.slice(i, i + BATCH_SIZE)
+      for (const value of chunk) {
+        const ref = doc(collection(db, col.name))
+        batch.set(ref, {
+          value,
+          status: 'approved',
+          submitted_at: serverTimestamp(),
+        })
+      }
+      await batch.commit()
+      result[col.key].written += chunk.length
+    }
+  }
+
+  return result
 }
 
 // ─── Filter counts ────────────────────────────────────────────────────────────
@@ -645,36 +718,48 @@ export async function findAndReplace(
   return { updatedRecords, updatedPendingItems }
 }
 
-// ─── Field Values — fetch active values from approved records ─────────────────
-// Returns distinct values actually present in approved tuition_records for
-// each of the four managed fields. This is what the "Field Values" admin tab
-// shows — the live data, not the pending_* option lists.
+// ─── Field Values — fetch ALL values from pending_* collections ────────────────────
+// Reads from pending_* collections (ALL statuses: pending/approved/rejected) so
+// every value ever submitted appears — not just ones used in current records.
+// Also counts how many tuition_records reference each value (any status).
 
 export type ManagedField = 'area' | 'university' | 'department' | 'subjects'
 
 export interface FieldValueEntry {
+  id: string       // Firestore doc ID in the pending_* collection
   value: string
-  count: number   // how many approved records reference this value
+  status: 'pending' | 'approved' | 'rejected'
+  count: number    // how many tuition_records (any status) reference this value
 }
 
-export async function fetchActiveFieldValues(): Promise<Record<ManagedField, FieldValueEntry[]>> {
+const MANAGED_FIELD_TO_PENDING: Record<ManagedField, string> = {
+  area:        'pending_areas',
+  university:  'pending_universities',
+  department:  'pending_departments',
+  subjects:    'pending_subjects',
+}
+
+// The field key in tuition_records that corresponds to each ManagedField
+const MANAGED_FIELD_TO_RECORD_KEY: Record<ManagedField, string> = {
+  area:        'area',
+  university:  'university',
+  department:  'department',
+  subjects:    'subjects',  // array field
+}
+
+export async function fetchAllFieldValues(): Promise<Record<ManagedField, FieldValueEntry[]>> {
   const db = await getDb()
-  const snap = await getDocs(
-    query(collection(db, 'tuition_records'), where('status', '==', 'approved'))
-  )
 
-  const counts: Record<ManagedField, Record<string, number>> = {
-    area: {},
-    university: {},
-    department: {},
-    subjects: {},
+  // Fetch all tuition_records to build usage counts
+  const recordsSnap = await getDocs(collection(db, 'tuition_records'))
+  const recordCounts: Record<ManagedField, Record<string, number>> = {
+    area: {}, university: {}, department: {}, subjects: {},
   }
-
-  for (const d of snap.docs) {
+  for (const d of recordsSnap.docs) {
     const r = d.data() as TuitionRecord
     const inc = (field: ManagedField, val: string) => {
       if (!val) return
-      counts[field][val] = (counts[field][val] || 0) + 1
+      recordCounts[field][val] = (recordCounts[field][val] || 0) + 1
     }
     inc('area', r.area)
     inc('university', r.university)
@@ -684,41 +769,99 @@ export async function fetchActiveFieldValues(): Promise<Record<ManagedField, Fie
     }
   }
 
-  const toSorted = (map: Record<string, number>): FieldValueEntry[] =>
-    Object.entries(map)
-      .map(([value, count]) => ({ value, count }))
-      .sort((a, b) => a.value.localeCompare(b.value))
+  // Fetch all pending_* collections
+  const fields: ManagedField[] = ['area', 'university', 'department', 'subjects']
+  const result = {} as Record<ManagedField, FieldValueEntry[]>
 
-  return {
-    area:        toSorted(counts.area),
-    university:  toSorted(counts.university),
-    department:  toSorted(counts.department),
-    subjects:    toSorted(counts.subjects),
+  for (const field of fields) {
+    const snap = await getDocs(collection(db, MANAGED_FIELD_TO_PENDING[field]))
+    const entries: FieldValueEntry[] = snap.docs.map(d => {
+      const data = d.data() as { value: string; status: 'pending' | 'approved' | 'rejected' }
+      return {
+        id: d.id,
+        value: data.value || '',
+        status: data.status || 'pending',
+        count: recordCounts[field][data.value] || 0,
+      }
+    })
+    // Sort alphabetically by value
+    entries.sort((a, b) => a.value.localeCompare(b.value))
+    result[field] = entries
   }
+
+  return result
 }
 
-// ─── Delete a field value ─────────────────────────────────────────────────────
+// ─── Edit a field value ──────────────────────────────────────────────────────────────────────────────
+// Renames a value across:
+//   1. The specific pending_* doc (by Firestore ID)
+//   2. Every tuition_record that references the old value (case-insensitive)
+// Returns counts of what changed.
+
+export async function editFieldValue(
+  fieldKey: ManagedField,
+  pendingDocId: string,
+  oldValue: string,
+  newValue: string
+): Promise<{ updatedRecords: number }> {
+  const db = await getDb()
+  const oldLower = oldValue.trim().toLowerCase()
+  const newClean = newValue.trim()
+
+  if (!oldLower) throw new Error('Old value is required.')
+  if (!newClean) throw new Error('New value cannot be empty.')
+  if (oldLower === newClean.toLowerCase()) throw new Error('New value is the same as the old one.')
+
+  // 1. Update the pending_* doc
+  const pendingCollection = MANAGED_FIELD_TO_PENDING[fieldKey]
+  await updateDoc(doc(db, pendingCollection, pendingDocId), { value: newClean })
+
+  // 2. Update all tuition_records that reference the old value
+  const recordsSnap = await getDocs(collection(db, 'tuition_records'))
+  const batch = writeBatch(db)
+  let updatedRecords = 0
+
+  for (const docSnap of recordsSnap.docs) {
+    const data = docSnap.data() as TuitionRecord
+    const ref = doc(db, 'tuition_records', docSnap.id)
+
+    if (fieldKey === 'subjects') {
+      const original = Array.isArray(data.subjects) ? data.subjects : []
+      const updated = original.map(s => s.toLowerCase() === oldLower ? newClean : s)
+      if (updated.some((s, i) => s !== original[i])) {
+        batch.update(ref, { subjects: updated })
+        updatedRecords++
+      }
+    } else {
+      const current = (data[MANAGED_FIELD_TO_RECORD_KEY[fieldKey]] as string) || ''
+      if (current.toLowerCase() === oldLower) {
+        batch.update(ref, { [MANAGED_FIELD_TO_RECORD_KEY[fieldKey]]: newClean })
+        updatedRecords++
+      }
+    }
+  }
+
+  await batch.commit()
+  return { updatedRecords }
+}
+
+// ─── Delete a field value ──────────────────────────────────────────────────────────────────────────────
 // Removes a value from:
-//   1. Every tuition_record where it appears (blanks string fields; removes
+//   1. The specific pending_* doc (deleted by Firestore ID)
+//   2. Every tuition_record where it appears (blanks string fields; removes
 //      the element from subjects arrays)
-//   2. Every matching doc in the corresponding pending_* collection (any status)
-//
-// String fields (area, university, department) are set to '' on affected records
-// so they remain valid documents. The admin can later use Find & Replace to
-// assign a correct value.
-//
 // Returns counts of what was modified.
 
 export async function deleteFieldValue(
   fieldKey: ManagedField,
+  pendingDocId: string,
   value: string
 ): Promise<{ updatedRecords: number; deletedPendingItems: number }> {
   const db = await getDb()
   const valueLower = value.trim().toLowerCase()
-
   if (!valueLower) throw new Error('Value is required.')
 
-  // ── 1. Scrub from tuition_records ─────────────────────────────────────────
+  // 1. Scrub from tuition_records
   const recordsSnap = await getDocs(collection(db, 'tuition_records'))
   const recordBatch = writeBatch(db)
   let updatedRecords = 0
@@ -735,37 +878,18 @@ export async function deleteFieldValue(
         updatedRecords++
       }
     } else {
-      const current = (data[fieldKey] as string) || ''
+      const current = (data[MANAGED_FIELD_TO_RECORD_KEY[fieldKey]] as string) || ''
       if (current.toLowerCase() === valueLower) {
-        recordBatch.update(ref, { [fieldKey]: '' })
+        recordBatch.update(ref, { [MANAGED_FIELD_TO_RECORD_KEY[fieldKey]]: '' })
         updatedRecords++
       }
     }
   }
-
   await recordBatch.commit()
 
-  // ── 2. Delete from pending_* collection ───────────────────────────────────
-  const FIELD_TO_PENDING_LOCAL: Record<ManagedField, string> = {
-    area: 'pending_areas',
-    university: 'pending_universities',
-    department: 'pending_departments',
-    subjects: 'pending_subjects',
-  }
-  const pendingCollection = FIELD_TO_PENDING_LOCAL[fieldKey]
-  const pendingSnap = await getDocs(collection(db, pendingCollection))
-  const pendingBatch = writeBatch(db)
-  let deletedPendingItems = 0
+  // 2. Delete the pending_* doc by ID
+  const pendingCollection = MANAGED_FIELD_TO_PENDING[fieldKey]
+  await deleteDoc(doc(db, pendingCollection, pendingDocId))
 
-  for (const docSnap of pendingSnap.docs) {
-    const data = docSnap.data() as { value: string }
-    if ((data.value || '').toLowerCase() === valueLower) {
-      pendingBatch.delete(doc(db, pendingCollection, docSnap.id))
-      deletedPendingItems++
-    }
-  }
-
-  await pendingBatch.commit()
-
-  return { updatedRecords, deletedPendingItems }
+  return { updatedRecords, deletedPendingItems: 1 }
 }

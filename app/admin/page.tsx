@@ -8,7 +8,7 @@ import { getAuthErrorMessage } from '../../lib/errors'
 import {
   formatBDT, fetchAdminStats, fetchAllRecords, updateRecordFields,
   fetchApprovedOptions, fetchAllPendingItems, updatePendingItem,
-  findAndReplace, fetchActiveFieldValues, deleteFieldValue,
+  findAndReplace, fetchAllFieldValues, editFieldValue, deleteFieldValue, seedOptionLists,
 } from '../../lib/benchmark'
 import type { PendingItemDoc, FindReplaceField, ManagedField, FieldValueEntry } from '../../lib/benchmark'
 import { trackAdminLogin, trackAdminLogout } from '../../lib/analytics'
@@ -819,10 +819,9 @@ function FindReplacePanel() {
   )
 }
 
-// ─── Field Values Panel ──────────────────────────────────────────────────────
-// Shows all distinct values currently active in approved records for each
-// managed field. Admin can delete any value — this scrubs it from all records
-// and removes it from the pending_* option list.
+// ─── Field Values Panel ──────────────────────────────────────────────────────────────────────────────
+// Shows ALL values from pending_* collections regardless of status or usage.
+// Admin can edit (rename + sync to all records) or delete any value.
 
 const FIELD_VALUE_TABS: { key: ManagedField; label: string }[] = [
   { key: 'area',        label: 'Areas' },
@@ -831,20 +830,27 @@ const FIELD_VALUE_TABS: { key: ManagedField; label: string }[] = [
   { key: 'subjects',    label: 'Subjects' },
 ]
 
+type ActionMode = { type: 'edit'; entry: FieldValueEntry } | { type: 'delete'; entry: FieldValueEntry } | null
+
 function FieldValuesPanel() {
   const [activeField, setActiveField] = useState<ManagedField>('university')
   const [allValues, setAllValues] = useState<Record<ManagedField, FieldValueEntry[]> | null>(null)
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
-  const [pendingDelete, setPendingDelete] = useState<string | null>(null)
-  const [deleting, setDeleting] = useState(false)
-  const [deleteError, setDeleteError] = useState('')
-  const [deleteResult, setDeleteResult] = useState<{ value: string; updatedRecords: number; deletedPendingItems: number } | null>(null)
+
+  // Active action (edit or delete) — only one at a time
+  const [action, setAction] = useState<ActionMode>(null)
+  const [busy, setBusy] = useState(false)
+  const [actionError, setActionError] = useState('')
+  const [successMsg, setSuccessMsg] = useState('')
+
+  // Edit draft value
+  const [editDraft, setEditDraft] = useState('')
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const data = await fetchActiveFieldValues()
+      const data = await fetchAllFieldValues()
       setAllValues(data)
     } catch { /* silent */ }
     finally { setLoading(false) }
@@ -852,52 +858,170 @@ function FieldValuesPanel() {
 
   useEffect(() => { load() }, [load])
 
+  const resetAction = () => { setAction(null); setActionError(''); setEditDraft('') }
+
+  const startEdit = (entry: FieldValueEntry) => {
+    setSuccessMsg('')
+    setAction({ type: 'edit', entry })
+    setEditDraft(entry.value)
+    setActionError('')
+  }
+
+  const startDelete = (entry: FieldValueEntry) => {
+    setSuccessMsg('')
+    setAction({ type: 'delete', entry })
+    setActionError('')
+  }
+
+  const handleEdit = async () => {
+    if (!action || action.type !== 'edit') return
+    const newVal = editDraft.trim()
+    if (!newVal) { setActionError('Value cannot be empty.'); return }
+    if (newVal.toLowerCase() === action.entry.value.toLowerCase()) { setActionError('No change detected.'); return }
+
+    setBusy(true); setActionError('')
+    try {
+      const result = await editFieldValue(activeField, action.entry.id, action.entry.value, newVal)
+      setSuccessMsg(`“${action.entry.value}” renamed to “${newVal}” · ${result.updatedRecords} record${result.updatedRecords !== 1 ? 's' : ''} updated`)
+      resetAction()
+      await load()
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Edit failed.')
+    } finally { setBusy(false) }
+  }
+
+  const handleDelete = async () => {
+    if (!action || action.type !== 'delete') return
+    setBusy(true); setActionError('')
+    try {
+      const result = await deleteFieldValue(activeField, action.entry.id, action.entry.value)
+      setSuccessMsg(`“${action.entry.value}” deleted · ${result.updatedRecords} record${result.updatedRecords !== 1 ? 's' : ''} updated`)
+      resetAction()
+      await load()
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Delete failed.')
+    } finally { setBusy(false) }
+  }
+
+  // ── Seed state ──────────────────────────────────────────────────────────────
+  const [seeding, setSeeding] = useState(false)
+  const [seedResult, setSeedResult] = useState<{ total: number; skipped: number } | null>(null)
+  const [seedError, setSeedError] = useState('')
+  const [seedConfirmed, setSeedConfirmed] = useState(false)
+
+  const handleSeed = async () => {
+    if (!seedConfirmed) { setSeedError('Check the confirmation box first.'); return }
+    setSeeding(true); setSeedError(''); setSeedResult(null)
+    try {
+      const res = await seedOptionLists()
+      const total = res.areas.written + res.subjects.written + res.universities.written + res.departments.written
+      const skipped = res.areas.skipped + res.subjects.skipped + res.universities.skipped + res.departments.skipped
+      setSeedResult({ total, skipped })
+      setSeedConfirmed(false)
+      await load()
+    } catch (e) {
+      setSeedError(e instanceof Error ? e.message : 'Seeding failed.')
+    } finally { setSeeding(false) }
+  }
+
   const currentList = allValues ? allValues[activeField] : []
   const filtered = currentList.filter(e =>
     e.value.toLowerCase().includes(search.toLowerCase())
   )
 
-  const handleDeleteConfirm = async () => {
-    if (!pendingDelete) return
-    setDeleting(true)
-    setDeleteError('')
-    try {
-      const result = await deleteFieldValue(activeField, pendingDelete)
-      setDeleteResult({ value: pendingDelete, ...result })
-      setPendingDelete(null)
-      await load()
-    } catch (e) {
-      setDeleteError(e instanceof Error ? e.message : 'Delete failed.')
-    } finally {
-      setDeleting(false)
-    }
+  const STATUS_BADGE: Record<string, string> = {
+    approved: 'bg-emerald-900/40 text-emerald-400 border border-emerald-700/40',
+    pending:  'bg-amber-900/40  text-amber-400  border border-amber-700/40',
+    rejected: 'bg-red-900/40   text-red-400   border border-red-700/40',
   }
-
-  const resetDelete = () => { setPendingDelete(null); setDeleteError('') }
 
   return (
     <div className="max-w-2xl">
       {/* Info banner */}
-      <div className="bg-[#1E293B] border border-[#1E3A8A]/40 rounded-2xl p-5 mb-6">
+      <div className="bg-[#1E293B] border border-[#1E3A8A]/40 rounded-2xl p-5 mb-4">
         <div className="flex items-start gap-3">
-          <div className="w-8 h-8 rounded-lg bg-red-900/40 border border-red-700/40 flex items-center justify-center flex-shrink-0 mt-0.5">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#F87171" strokeWidth="2">
-              <polyline points="3 6 5 6 21 6"/>
-              <path d="M19 6l-1 14H6L5 6"/>
-              <path d="M10 11v6M14 11v6"/>
-              <path d="M9 6V4h6v2"/>
+          <div className="w-8 h-8 rounded-lg bg-blue-900/40 border border-blue-700/40 flex items-center justify-center flex-shrink-0 mt-0.5">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#60A5FA" strokeWidth="2">
+              <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
+              <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
             </svg>
           </div>
           <div>
-            <p className="text-white text-sm font-semibold mb-1">Manage active field values</p>
+            <p className="text-white text-sm font-semibold mb-1">Manage all field values</p>
             <p className="text-slate-400 text-xs leading-relaxed">
-              Shows every distinct value currently in use across approved salary reports.
-              Deleting a value removes it from all records and the option dropdown permanently.
-              Use <span className="text-slate-300">Find &amp; Replace</span> first if you want
-              to reassign records to a different value instead.
+              Shows every value in the option lists (all statuses). <span className="text-slate-300">Edit</span> renames a value and syncs the change across all salary records.
+              <span className="text-slate-300"> Delete</span> removes it from the list and blanks it in any record that used it.
             </p>
           </div>
         </div>
+      </div>
+
+      {/* ── Seed Option Lists ── one-time migration ──────────────────────────── */}
+      <div className="bg-[#1E293B] border border-amber-700/30 rounded-2xl p-5 mb-6">
+        <div className="flex items-start gap-3 mb-4">
+          <div className="w-8 h-8 rounded-lg bg-amber-900/40 border border-amber-700/40 flex items-center justify-center flex-shrink-0 mt-0.5">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#FCD34D" strokeWidth="2">
+              <ellipse cx="12" cy="5" rx="9" ry="3"/>
+              <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+              <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+            </svg>
+          </div>
+          <div>
+            <p className="text-white text-sm font-semibold mb-1">Seed option lists from defaults</p>
+            <p className="text-slate-400 text-xs leading-relaxed">
+              One-time operation. Writes all preloaded areas, subjects, universities and departments
+              from the codebase into Firestore so they appear here and can be managed.
+              Already-existing values are skipped automatically.
+            </p>
+          </div>
+        </div>
+
+        {seedResult && (
+          <div className="bg-emerald-950/30 border border-emerald-700/40 rounded-xl px-4 py-3 mb-4">
+            <p className="text-emerald-400 text-xs font-semibold mb-0.5">Seeding complete</p>
+            <p className="text-slate-400 text-xs">
+              {seedResult.total} value{seedResult.total !== 1 ? 's' : ''} written &middot; {seedResult.skipped} already existed and were skipped
+            </p>
+          </div>
+        )}
+
+        {seedError && (
+          <div className="bg-red-950/40 border border-red-900/40 rounded-xl px-4 py-3 mb-4">
+            <p className="text-red-400 text-xs">{seedError}</p>
+          </div>
+        )}
+
+        <label className="flex items-start gap-3 cursor-pointer select-none mb-4">
+          <div className="relative flex-shrink-0 mt-0.5">
+            <input type="checkbox" checked={seedConfirmed} onChange={e => { setSeedConfirmed(e.target.checked); setSeedError('') }} className="sr-only"/>
+            <div className={`w-4 h-4 rounded border transition-colors ${seedConfirmed ? 'bg-[#059669] border-[#059669]' : 'border-[#1E3A8A]/60 bg-[#0F172A]'}`}>
+              {seedConfirmed && (
+                <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="white" strokeWidth="2" className="absolute inset-0.5">
+                  <polyline points="2 6 5 9 10 3"/>
+                </svg>
+              )}
+            </div>
+          </div>
+          <span className="text-slate-400 text-xs leading-relaxed">
+            I understand this writes the default option lists to Firestore. Safe to run multiple times — duplicates are skipped.
+          </span>
+        </label>
+
+        <button
+          onClick={handleSeed}
+          disabled={seeding || !seedConfirmed}
+          className="px-5 py-2.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors"
+        >
+          {seeding ? (
+            <span className="flex items-center gap-2">
+              <svg className="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+              </svg>
+              Seeding...
+            </span>
+          ) : 'Seed Option Lists'}
+        </button>
       </div>
 
       <div className="bg-[#1E293B] border border-[#1E3A8A]/40 rounded-2xl overflow-hidden">
@@ -906,11 +1030,9 @@ function FieldValuesPanel() {
           {FIELD_VALUE_TABS.map(tab => (
             <button
               key={tab.key}
-              onClick={() => { setActiveField(tab.key); setSearch(''); setDeleteResult(null); setDeleteError(''); setPendingDelete(null) }}
+              onClick={() => { setActiveField(tab.key); setSearch(''); setSuccessMsg(''); resetAction() }}
               className={`flex-1 py-3 text-xs font-semibold transition-colors border-r border-[#1E3A8A]/40 last:border-r-0 ${
-                activeField === tab.key
-                  ? 'bg-[#0F172A] text-white'
-                  : 'text-slate-400 hover:text-white hover:bg-white/5'
+                activeField === tab.key ? 'bg-[#0F172A] text-white' : 'text-slate-400 hover:text-white hover:bg-white/5'
               }`}
             >
               {tab.label}
@@ -936,54 +1058,83 @@ function FieldValuesPanel() {
         </div>
 
         {/* Success banner */}
-        {deleteResult && (
-          <div className="mx-5 mt-4 bg-emerald-950/30 border border-emerald-700/40 rounded-xl px-4 py-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-emerald-400 text-xs font-semibold mb-1">&ldquo;{deleteResult.value}&rdquo; deleted</p>
-                <p className="text-slate-400 text-xs">
-                  {deleteResult.updatedRecords} record{deleteResult.updatedRecords !== 1 ? 's' : ''} updated &middot;{' '}
-                  {deleteResult.deletedPendingItems} option entr{deleteResult.deletedPendingItems !== 1 ? 'ies' : 'y'} removed
+        {successMsg && (
+          <div className="mx-5 mt-4 bg-emerald-950/30 border border-emerald-700/40 rounded-xl px-4 py-3 flex items-center justify-between">
+            <p className="text-emerald-400 text-xs font-medium">{successMsg}</p>
+            <button onClick={() => setSuccessMsg('\')} className="text-slate-500 hover:text-white text-lg leading-none ml-4">×</button>
+          </div>
+        )}
+
+        {/* Action panel — edit or delete confirmation */}
+        {action && (
+          <div className={`mx-5 mt-4 rounded-xl px-4 py-4 border ${
+            action.type === 'edit'
+              ? 'bg-blue-950/30 border-blue-800/50'
+              : 'bg-red-950/30 border-red-800/50'
+          }`}>
+            {action.type === 'edit' ? (
+              <>
+                <p className="text-white text-sm font-semibold mb-3">
+                  Rename “{action.entry.value}”
                 </p>
-              </div>
-              <button onClick={() => setDeleteResult(null)} className="text-slate-500 hover:text-white text-lg leading-none ml-4">×</button>
-            </div>
-          </div>
-        )}
-
-        {/* Error banner */}
-        {deleteError && (
-          <div className="mx-5 mt-4 bg-red-950/40 border border-red-900/40 rounded-xl px-4 py-3 flex items-center justify-between">
-            <p className="text-red-400 text-xs">{deleteError}</p>
-            <button onClick={() => setDeleteError('')} className="text-slate-500 hover:text-white text-lg leading-none ml-4">×</button>
-          </div>
-        )}
-
-        {/* Inline delete confirmation */}
-        {pendingDelete && (
-          <div className="mx-5 mt-4 bg-red-950/30 border border-red-800/50 rounded-xl px-4 py-4">
-            <p className="text-white text-sm font-semibold mb-1">Delete &ldquo;{pendingDelete}&rdquo;?</p>
-            <p className="text-slate-400 text-xs mb-4 leading-relaxed">
-              This will remove this value from all salary records and the option list. This cannot be undone.
-            </p>
-            <div className="flex gap-2">
-              <button onClick={handleDeleteConfirm} disabled={deleting}
-                className="px-4 py-2 bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors">
-                {deleting ? (
-                  <span className="flex items-center gap-1.5">
-                    <svg className="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-                    </svg>
-                    Deleting...
-                  </span>
-                ) : 'Yes, delete'}
-              </button>
-              <button onClick={resetDelete} disabled={deleting}
-                className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-50">
-                Cancel
-              </button>
-            </div>
+                <input
+                  type="text"
+                  value={editDraft}
+                  onChange={e => { setEditDraft(e.target.value); setActionError('') }}
+                  onKeyDown={e => { if (e.key === 'Enter') handleEdit(); if (e.key === 'Escape') resetAction() }}
+                  autoFocus
+                  className="w-full px-3 py-2 bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg text-sm text-white focus:outline-none focus:border-[#059669] mb-3"
+                />
+                <p className="text-slate-500 text-xs mb-3 leading-relaxed">
+                  This will update the value in the option list and rename it across all salary records.
+                </p>
+                {actionError && <p className="text-red-400 text-xs mb-3">{actionError}</p>}
+                <div className="flex gap-2">
+                  <button onClick={handleEdit} disabled={busy}
+                    className="px-4 py-2 bg-[#059669] hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors">
+                    {busy ? (
+                      <span className="flex items-center gap-1.5">
+                        <svg className="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                        </svg>
+                        Saving...
+                      </span>
+                    ) : 'Save & Sync'}
+                  </button>
+                  <button onClick={resetAction} disabled={busy}
+                    className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-50">
+                    Cancel
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="text-white text-sm font-semibold mb-1">Delete “{action.entry.value}”?</p>
+                <p className="text-slate-400 text-xs mb-4 leading-relaxed">
+                  This removes the entry from the option list and blanks the field in any records that used it. Cannot be undone.
+                </p>
+                {actionError && <p className="text-red-400 text-xs mb-3">{actionError}</p>}
+                <div className="flex gap-2">
+                  <button onClick={handleDelete} disabled={busy}
+                    className="px-4 py-2 bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors">
+                    {busy ? (
+                      <span className="flex items-center gap-1.5">
+                        <svg className="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                        </svg>
+                        Deleting...
+                      </span>
+                    ) : 'Yes, delete'}
+                  </button>
+                  <button onClick={resetAction} disabled={busy}
+                    className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-50">
+                    Cancel
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )}
 
@@ -992,30 +1143,56 @@ function FieldValuesPanel() {
           <div className="px-5 py-10 text-center text-slate-500 text-sm">Loading...</div>
         ) : filtered.length === 0 ? (
           <div className="px-5 py-10 text-center text-slate-500 text-sm">
-            {search ? 'No values match your search.' : 'No active values found.'}
+            {search ? 'No values match your search.' : 'No values found.'}
           </div>
         ) : (
           <div className="divide-y divide-[#1E3A8A]/30 max-h-[480px] overflow-y-auto">
             {filtered.map(entry => {
-              const isPending = pendingDelete === entry.value
+              const isActive = action && action.entry.id === entry.id
               return (
-                <div key={entry.value}
-                  className={`flex items-center justify-between px-5 py-3.5 transition-colors ${isPending ? 'bg-red-950/20' : 'hover:bg-white/5'}`}>
+                <div key={entry.id}
+                  className={`flex items-center justify-between px-5 py-3.5 gap-3 transition-colors ${
+                    isActive
+                      ? action.type === 'edit' ? 'bg-blue-950/20' : 'bg-red-950/20'
+                      : 'hover:bg-white/5'
+                  }`}>
                   <div className="flex-1 min-w-0">
-                    <p className="text-white text-sm font-medium truncate">{entry.value}</p>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="text-white text-sm font-medium truncate">{entry.value}</p>
+                      <span className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded-full ${STATUS_BADGE[entry.status] || STATUS_BADGE.pending}`}>
+                        {entry.status}
+                      </span>
+                    </div>
                     <p className="text-slate-500 text-xs mt-0.5">
-                      {entry.count} approved report{entry.count !== 1 ? 's' : ''}
+                      {entry.count > 0
+                        ? `${entry.count} record${entry.count !== 1 ? 's' : ''}`
+                        : 'not used in any record'}
                     </p>
                   </div>
-                  <button
-                    onClick={() => { setDeleteResult(null); setDeleteError(''); setPendingDelete(isPending ? null : entry.value) }}
-                    className={`ml-4 flex-shrink-0 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
-                      isPending
-                        ? 'bg-red-600 border-red-600 text-white'
-                        : 'border-red-900/50 text-red-400 hover:bg-red-950/40 hover:border-red-700'
-                    }`}>
-                    {isPending ? 'Confirming...' : 'Delete'}
-                  </button>
+                  <div className="flex gap-1.5 flex-shrink-0">
+                    {/* Edit button */}
+                    <button
+                      onClick={() => isActive && action.type === 'edit' ? resetAction() : startEdit(entry)}
+                      disabled={busy}
+                      className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors disabled:opacity-40 ${
+                        isActive && action.type === 'edit'
+                          ? 'bg-blue-600 border-blue-600 text-white'
+                          : 'border-[#1E3A8A]/60 text-slate-400 hover:bg-white/5 hover:text-white'
+                      }`}>
+                      Edit
+                    </button>
+                    {/* Delete button */}
+                    <button
+                      onClick={() => isActive && action.type === 'delete' ? resetAction() : startDelete(entry)}
+                      disabled={busy}
+                      className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors disabled:opacity-40 ${
+                        isActive && action.type === 'delete'
+                          ? 'bg-red-600 border-red-600 text-white'
+                          : 'border-red-900/50 text-red-400 hover:bg-red-950/40 hover:border-red-700'
+                      }`}>
+                      Delete
+                    </button>
+                  </div>
                 </div>
               )
             })}
@@ -1025,7 +1202,7 @@ function FieldValuesPanel() {
         {!loading && filtered.length > 0 && (
           <div className="px-5 py-3 border-t border-[#1E3A8A]/40">
             <p className="text-xs text-slate-600">
-              {filtered.length} value{filtered.length !== 1 ? 's' : ''}{search ? ` matching "${search}"` : ' total'}
+              {filtered.length} value{filtered.length !== 1 ? 's' : ''}{search ? ` matching “${search}”` : ' total'}
             </p>
           </div>
         )}
