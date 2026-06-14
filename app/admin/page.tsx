@@ -852,6 +852,10 @@ function FieldValuesPanel() {
   const [seedError, setSeedError] = useState('')
   const [seedConfirmed, setSeedConfirmed] = useState(false)
 
+  // Multi-select state
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [bulkBusy, setBulkBusy] = useState(false)
+
   // Flash message
   const [flash, setFlash] = useState('')
 
@@ -926,6 +930,44 @@ function FieldValuesPanel() {
 
   const activeCount   = filtered.filter(e => e.is_active).length
   const inactiveCount = filtered.filter(e => !e.is_active).length
+
+  // Multi-select helpers
+  const allFilteredIds = filtered.map(e => e.id)
+  const allSelected = allFilteredIds.length > 0 && allFilteredIds.every(id => selected.has(id))
+  const someSelected = allFilteredIds.some(id => selected.has(id)) && !allSelected
+  const selectedCount = allFilteredIds.filter(id => selected.has(id)).length
+
+  const toggleSelect = (id: string) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+
+  const toggleSelectAll = () => {
+    if (allSelected) {
+      setSelected(prev => { const next = new Set(prev); allFilteredIds.forEach(id => next.delete(id)); return next })
+    } else {
+      setSelected(prev => new Set([...prev, ...allFilteredIds]))
+    }
+  }
+
+  const handleBulkToggle = async (newActiveState: boolean) => {
+    const ids = allFilteredIds.filter(id => selected.has(id))
+    if (ids.length === 0) return
+    setBulkBusy(true)
+    try {
+      await Promise.all(
+        ids.map(id => toggleFieldValueActive(activeField, id, newActiveState))
+      )
+      showFlash(`${ids.length} value${ids.length !== 1 ? 's' : ''} ${newActiveState ? 'activated' : 'deactivated'}`)
+      setSelected(new Set())
+      await load()
+    } catch {
+      showFlash('Bulk toggle failed. Please try again.')
+    } finally { setBulkBusy(false) }
+  }
 
   return (
     <div className="max-w-2xl">
@@ -1011,7 +1053,7 @@ function FieldValuesPanel() {
         <div className="flex border-b border-[#1E3A8A]/40">
           {FIELD_VALUE_TABS.map(tab => (
             <button key={tab.key}
-              onClick={() => { setActiveField(tab.key); setSearch(''); setAction(null); setEditError('') }}
+              onClick={() => { setActiveField(tab.key); setSearch(''); setAction(null); setEditError(''); setSelected(new Set()) }}
               className={`flex-1 py-3 text-xs font-semibold transition-colors border-r border-[#1E3A8A]/40 last:border-r-0 ${
                 activeField === tab.key ? 'bg-[#0F172A] text-white' : 'text-slate-400 hover:text-white hover:bg-white/5'
               }`}>
@@ -1038,6 +1080,31 @@ function FieldValuesPanel() {
             <span className="text-xs text-slate-500">{activeCount} active</span>
             <span className="text-xs text-slate-600">·</span>
             <span className="text-xs text-slate-500">{inactiveCount} inactive</span>
+          </div>
+        )}
+
+        {/* Bulk action bar — shown when any items are selected */}
+        {selectedCount > 0 && (
+          <div className="px-5 py-3 border-b border-[#1E3A8A]/40 bg-[#0F172A] flex items-center gap-3 flex-wrap">
+            <span className="text-xs text-slate-300 font-semibold">{selectedCount} selected</span>
+            <button
+              onClick={() => handleBulkToggle(true)}
+              disabled={bulkBusy}
+              className="px-3 py-1.5 bg-[#059669] hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors">
+              {bulkBusy ? '...' : 'Activate All'}
+            </button>
+            <button
+              onClick={() => handleBulkToggle(false)}
+              disabled={bulkBusy}
+              className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white text-xs font-semibold rounded-lg border border-slate-600 transition-colors">
+              {bulkBusy ? '...' : 'Deactivate All'}
+            </button>
+            <button
+              onClick={() => setSelected(new Set())}
+              disabled={bulkBusy}
+              className="ml-auto text-xs text-slate-500 hover:text-white transition-colors">
+              Clear selection
+            </button>
           </div>
         )}
 
@@ -1089,14 +1156,50 @@ function FieldValuesPanel() {
           </div>
         ) : (
           <div className="divide-y divide-[#1E3A8A]/30 max-h-[520px] overflow-y-auto">
+            {/* Select-all header row */}
+            <div className="flex items-center gap-3 px-5 py-2.5 bg-[#0F172A]/60 sticky top-0 z-10">
+              <button
+                onClick={toggleSelectAll}
+                disabled={bulkBusy}
+                className="w-4 h-4 rounded border flex-shrink-0 flex items-center justify-center transition-colors disabled:opacity-40 border-[#1E3A8A]/60 bg-[#0F172A] hover:border-slate-400"
+                aria-label="Select all"
+              >
+                {allSelected ? (
+                  <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="#059669" strokeWidth="2.5">
+                    <polyline points="2 6 5 9 10 3"/>
+                  </svg>
+                ) : someSelected ? (
+                  <div className="w-2 h-0.5 bg-slate-400 rounded"/>
+                ) : null}
+              </button>
+              <span className="text-xs text-slate-500 select-none">
+                {allSelected ? 'Deselect all' : 'Select all'}
+              </span>
+            </div>
+
             {filtered.map(entry => {
               const isEditTarget = action?.entry.id === entry.id
               const isToggling = togglingId === entry.id
+              const isSelected = selected.has(entry.id)
               return (
                 <div key={entry.id}
-                  className={`flex items-center justify-between px-5 py-3.5 gap-3 transition-colors ${
-                    isEditTarget ? 'bg-blue-950/20' : 'hover:bg-white/5'
+                  className={`flex items-center gap-3 px-5 py-3.5 transition-colors ${
+                    isSelected ? 'bg-[#1E3A8A]/20' : isEditTarget ? 'bg-blue-950/20' : 'hover:bg-white/5'
                   }`}>
+                  {/* Checkbox */}
+                  <button
+                    onClick={() => toggleSelect(entry.id)}
+                    disabled={bulkBusy}
+                    className="w-4 h-4 rounded border flex-shrink-0 flex items-center justify-center transition-colors disabled:opacity-40 border-[#1E3A8A]/60 bg-[#0F172A] hover:border-slate-400"
+                    aria-label={`Select ${entry.value}`}
+                  >
+                    {isSelected && (
+                      <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="#059669" strokeWidth="2.5">
+                        <polyline points="2 6 5 9 10 3"/>
+                      </svg>
+                    )}
+                  </button>
+
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <p className={`text-sm font-medium truncate ${entry.is_active ? 'text-white' : 'text-slate-500'}`}>
@@ -1117,10 +1220,10 @@ function FieldValuesPanel() {
                   </div>
 
                   <div className="flex gap-1.5 flex-shrink-0">
-                    {/* Toggle Active/Inactive */}
+                    {/* Toggle Active/Inactive (single) */}
                     <button
                       onClick={() => handleToggle(entry)}
-                      disabled={isToggling || editBusy}
+                      disabled={isToggling || editBusy || bulkBusy}
                       title={entry.is_active ? 'Deactivate (hide from dropdowns)' : 'Activate (show in dropdowns)'}
                       className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors disabled:opacity-40 ${
                         entry.is_active
@@ -1132,7 +1235,7 @@ function FieldValuesPanel() {
                     {/* Edit */}
                     <button
                       onClick={() => isEditTarget ? setAction(null) : startEdit(entry)}
-                      disabled={editBusy || isToggling}
+                      disabled={editBusy || isToggling || bulkBusy}
                       className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors disabled:opacity-40 ${
                         isEditTarget
                           ? 'bg-blue-600 border-blue-600 text-white'
