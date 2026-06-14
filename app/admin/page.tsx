@@ -1061,7 +1061,7 @@ function FieldValuesPanel() {
         {successMsg && (
           <div className="mx-5 mt-4 bg-emerald-950/30 border border-emerald-700/40 rounded-xl px-4 py-3 flex items-center justify-between">
             <p className="text-emerald-400 text-xs font-medium">{successMsg}</p>
-            <button onClick={() => setSuccessMsg('\')} className="text-slate-500 hover:text-white text-lg leading-none ml-4">×</button>
+            <button onClick={() => setSuccessMsg('')} className="text-slate-500 hover:text-white text-lg leading-none ml-4">×</button>
           </div>
         )}
 
