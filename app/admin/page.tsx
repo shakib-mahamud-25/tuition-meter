@@ -8,7 +8,7 @@ import { getAuthErrorMessage } from '../../lib/errors'
 import {
   formatBDT, fetchAdminStats, fetchAllRecords, updateRecordFields,
   fetchApprovedOptions, fetchAllPendingItems, updatePendingItem,
-  findAndReplace, fetchAllFieldValues, editFieldValue, deleteFieldValue,
+  findAndReplace, fetchAllFieldValues, editFieldValue, toggleFieldValueActive, seedOptionLists,
 } from '../../lib/benchmark'
 import type { PendingItemDoc, FindReplaceField, ManagedField, FieldValueEntry } from '../../lib/benchmark'
 import { trackAdminLogin, trackAdminLogout } from '../../lib/analytics'
@@ -820,8 +820,9 @@ function FindReplacePanel() {
 }
 
 // ─── Field Values Panel ──────────────────────────────────────────────────────────────────────────────
-// Shows ALL values from pending_* collections regardless of status or usage.
-// Admin can edit (rename + sync to all records) or delete any value.
+// Shows ALL values from pending_* collections.
+// Active/Inactive toggle controls dropdown visibility only.
+// Salary records are NEVER touched by any action here.
 
 const FIELD_VALUE_TABS: { key: ManagedField; label: string }[] = [
   { key: 'area',        label: 'Areas' },
@@ -830,22 +831,34 @@ const FIELD_VALUE_TABS: { key: ManagedField; label: string }[] = [
   { key: 'subjects',    label: 'Subjects' },
 ]
 
-type ActionMode = { type: 'edit'; entry: FieldValueEntry } | { type: 'delete'; entry: FieldValueEntry } | null
+type ActionMode = { type: 'edit'; entry: FieldValueEntry } | null
 
 function FieldValuesPanel() {
   const [activeField, setActiveField] = useState<ManagedField>('university')
   const [allValues, setAllValues] = useState<Record<ManagedField, FieldValueEntry[]> | null>(null)
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
+  const [togglingId, setTogglingId] = useState<string | null>(null)
 
-  // Active action (edit or delete) — only one at a time
+  // Edit state
   const [action, setAction] = useState<ActionMode>(null)
-  const [busy, setBusy] = useState(false)
-  const [actionError, setActionError] = useState('')
-  const [successMsg, setSuccessMsg] = useState('')
-
-  // Edit draft value
   const [editDraft, setEditDraft] = useState('')
+  const [editBusy, setEditBusy] = useState(false)
+  const [editError, setEditError] = useState('')
+
+  // Seed state
+  const [seeding, setSeeding] = useState(false)
+  const [seedResult, setSeedResult] = useState<{ total: number; skipped: number } | null>(null)
+  const [seedError, setSeedError] = useState('')
+  const [seedConfirmed, setSeedConfirmed] = useState(false)
+
+  // Flash message
+  const [flash, setFlash] = useState('')
+
+  const showFlash = (msg: string) => {
+    setFlash(msg)
+    setTimeout(() => setFlash(''), 4000)
+  }
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -858,49 +871,52 @@ function FieldValuesPanel() {
 
   useEffect(() => { load() }, [load])
 
-  const resetAction = () => { setAction(null); setActionError(''); setEditDraft('') }
-
-  const startEdit = (entry: FieldValueEntry) => {
-    setSuccessMsg('')
-    setAction({ type: 'edit', entry })
-    setEditDraft(entry.value)
-    setActionError('')
+  const handleToggle = async (entry: FieldValueEntry) => {
+    setTogglingId(entry.id)
+    try {
+      await toggleFieldValueActive(activeField, entry.id, !entry.is_active)
+      showFlash(`"${entry.value}" ${!entry.is_active ? 'activated' : 'deactivated'}`)
+      await load()
+    } catch {
+      showFlash('Toggle failed. Please try again.')
+    } finally { setTogglingId(null) }
   }
 
-  const startDelete = (entry: FieldValueEntry) => {
-    setSuccessMsg('')
-    setAction({ type: 'delete', entry })
-    setActionError('')
+  const startEdit = (entry: FieldValueEntry) => {
+    setAction({ type: 'edit', entry })
+    setEditDraft(entry.value)
+    setEditError('')
   }
 
   const handleEdit = async () => {
-    if (!action || action.type !== 'edit') return
+    if (!action) return
     const newVal = editDraft.trim()
-    if (!newVal) { setActionError('Value cannot be empty.'); return }
-    if (newVal.toLowerCase() === action.entry.value.toLowerCase()) { setActionError('No change detected.'); return }
-
-    setBusy(true); setActionError('')
+    if (!newVal) { setEditError('Value cannot be empty.'); return }
+    if (newVal.toLowerCase() === action.entry.value.toLowerCase()) { setEditError('No change detected.'); return }
+    setEditBusy(true); setEditError('')
     try {
       const result = await editFieldValue(activeField, action.entry.id, action.entry.value, newVal)
-      setSuccessMsg(`“${action.entry.value}” renamed to “${newVal}” · ${result.updatedRecords} record${result.updatedRecords !== 1 ? 's' : ''} updated`)
-      resetAction()
+      showFlash(`“${action.entry.value}” renamed to “${newVal}” · ${result.updatedRecords} record${result.updatedRecords !== 1 ? 's' : ''} updated`)
+      setAction(null)
       await load()
     } catch (e) {
-      setActionError(e instanceof Error ? e.message : 'Edit failed.')
-    } finally { setBusy(false) }
+      setEditError(e instanceof Error ? e.message : 'Edit failed.')
+    } finally { setEditBusy(false) }
   }
 
-  const handleDelete = async () => {
-    if (!action || action.type !== 'delete') return
-    setBusy(true); setActionError('')
+  const handleSeed = async () => {
+    if (!seedConfirmed) { setSeedError('Check the confirmation box first.'); return }
+    setSeeding(true); setSeedError(''); setSeedResult(null)
     try {
-      const result = await deleteFieldValue(activeField, action.entry.id, action.entry.value)
-      setSuccessMsg(`“${action.entry.value}” deleted · ${result.updatedRecords} record${result.updatedRecords !== 1 ? 's' : ''} updated`)
-      resetAction()
+      const res = await seedOptionLists()
+      const total = res.areas.written + res.subjects.written + res.universities.written + res.departments.written
+      const skipped = res.areas.skipped + res.subjects.skipped + res.universities.skipped + res.departments.skipped
+      setSeedResult({ total, skipped })
+      setSeedConfirmed(false)
       await load()
     } catch (e) {
-      setActionError(e instanceof Error ? e.message : 'Delete failed.')
-    } finally { setBusy(false) }
+      setSeedError(e instanceof Error ? e.message : 'Seeding failed.')
+    } finally { setSeeding(false) }
   }
 
   const currentList = allValues ? allValues[activeField] : []
@@ -908,28 +924,83 @@ function FieldValuesPanel() {
     e.value.toLowerCase().includes(search.toLowerCase())
   )
 
-  const STATUS_BADGE: Record<string, string> = {
-    approved: 'bg-emerald-900/40 text-emerald-400 border border-emerald-700/40',
-    pending:  'bg-amber-900/40  text-amber-400  border border-amber-700/40',
-    rejected: 'bg-red-900/40   text-red-400   border border-red-700/40',
-  }
+  const activeCount   = filtered.filter(e => e.is_active).length
+  const inactiveCount = filtered.filter(e => !e.is_active).length
 
   return (
     <div className="max-w-2xl">
-      {/* Info banner */}
+
+      {/* ── Seed Option Lists ─────────────────────────────────────────────── */}
+      <div className="bg-[#1E293B] border border-amber-700/30 rounded-2xl p-5 mb-6">
+        <div className="flex items-start gap-3 mb-4">
+          <div className="w-8 h-8 rounded-lg bg-amber-900/40 border border-amber-700/40 flex items-center justify-center flex-shrink-0 mt-0.5">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#FCD34D" strokeWidth="2">
+              <ellipse cx="12" cy="5" rx="9" ry="3"/>
+              <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+              <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+            </svg>
+          </div>
+          <div>
+            <p className="text-white text-sm font-semibold mb-1">Seed option lists from defaults</p>
+            <p className="text-slate-400 text-xs leading-relaxed">
+              One-time operation. Writes all preloaded areas, subjects, universities and departments into Firestore so they appear below and can be managed. Safe to run multiple times — duplicates are skipped.
+            </p>
+          </div>
+        </div>
+
+        {seedResult && (
+          <div className="bg-emerald-950/30 border border-emerald-700/40 rounded-xl px-4 py-3 mb-4">
+            <p className="text-emerald-400 text-xs font-semibold mb-0.5">Seeding complete</p>
+            <p className="text-slate-400 text-xs">{seedResult.total} values written &middot; {seedResult.skipped} already existed and skipped</p>
+          </div>
+        )}
+        {seedError && (
+          <div className="bg-red-950/40 border border-red-900/40 rounded-xl px-4 py-3 mb-4">
+            <p className="text-red-400 text-xs">{seedError}</p>
+          </div>
+        )}
+
+        <label className="flex items-start gap-3 cursor-pointer select-none mb-4">
+          <div className="relative flex-shrink-0 mt-0.5">
+            <input type="checkbox" checked={seedConfirmed} onChange={e => { setSeedConfirmed(e.target.checked); setSeedError('') }} className="sr-only"/>
+            <div className={`w-4 h-4 rounded border transition-colors ${seedConfirmed ? 'bg-[#059669] border-[#059669]' : 'border-[#1E3A8A]/60 bg-[#0F172A]'}`}>
+              {seedConfirmed && (
+                <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="white" strokeWidth="2" className="absolute inset-0.5">
+                  <polyline points="2 6 5 9 10 3"/>
+                </svg>
+              )}
+            </div>
+          </div>
+          <span className="text-slate-400 text-xs leading-relaxed">I understand this writes the default option lists to Firestore. Safe to re-run.</span>
+        </label>
+
+        <button onClick={handleSeed} disabled={seeding || !seedConfirmed}
+          className="px-5 py-2.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors">
+          {seeding ? (
+            <span className="flex items-center gap-2">
+              <svg className="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+              </svg>
+              Seeding...
+            </span>
+          ) : 'Seed Option Lists'}
+        </button>
+      </div>
+
+      {/* ── Info banner ───────────────────────────────────────────────────── */}
       <div className="bg-[#1E293B] border border-[#1E3A8A]/40 rounded-2xl p-5 mb-6">
         <div className="flex items-start gap-3">
           <div className="w-8 h-8 rounded-lg bg-blue-900/40 border border-blue-700/40 flex items-center justify-center flex-shrink-0 mt-0.5">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#60A5FA" strokeWidth="2">
-              <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
-              <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
+              <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01" strokeLinecap="round"/>
             </svg>
           </div>
           <div>
-            <p className="text-white text-sm font-semibold mb-1">Manage all field values</p>
+            <p className="text-white text-sm font-semibold mb-1">Active / Inactive controls visibility only</p>
             <p className="text-slate-400 text-xs leading-relaxed">
-              Shows every value in the option lists (all statuses). <span className="text-slate-300">Edit</span> renames a value and syncs the change across all salary records.
-              <span className="text-slate-300"> Delete</span> removes it from the list and blanks it in any record that used it.
+              <span className="text-emerald-400 font-semibold">Active</span> values appear in the submit form and benchmark filter dropdowns.
+              <span className="text-slate-300"> Inactive</span> values are hidden from dropdowns — but every salary record that references them is kept exactly as-is. No data is lost.
             </p>
           </div>
         </div>
@@ -939,113 +1010,73 @@ function FieldValuesPanel() {
         {/* Field type selector */}
         <div className="flex border-b border-[#1E3A8A]/40">
           {FIELD_VALUE_TABS.map(tab => (
-            <button
-              key={tab.key}
-              onClick={() => { setActiveField(tab.key); setSearch(''); setSuccessMsg(''); resetAction() }}
+            <button key={tab.key}
+              onClick={() => { setActiveField(tab.key); setSearch(''); setAction(null); setEditError('') }}
               className={`flex-1 py-3 text-xs font-semibold transition-colors border-r border-[#1E3A8A]/40 last:border-r-0 ${
                 activeField === tab.key ? 'bg-[#0F172A] text-white' : 'text-slate-400 hover:text-white hover:bg-white/5'
-              }`}
-            >
+              }`}>
               {tab.label}
-              {allValues && (
-                <span className="ml-1.5 text-slate-500 font-normal">({allValues[tab.key].length})</span>
-              )}
+              {allValues && <span className="ml-1.5 text-slate-500 font-normal">({allValues[tab.key].length})</span>}
             </button>
           ))}
         </div>
 
         {/* Search + refresh */}
-        <div className="px-5 py-4 border-b border-[#1E3A8A]/40 flex gap-2">
-          <input
-            value={search}
-            onChange={e => setSearch(e.target.value)}
+        <div className="px-5 py-4 border-b border-[#1E3A8A]/40 flex gap-2 items-center">
+          <input value={search} onChange={e => setSearch(e.target.value)}
             placeholder={`Search ${FIELD_VALUE_TABS.find(t => t.key === activeField)?.label.toLowerCase()}...`}
-            className="flex-1 px-3 py-2 bg-[#0F172A] border border-[#1E3A8A]/40 rounded-lg text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-[#059669]"
-          />
+            className="flex-1 px-3 py-2 bg-[#0F172A] border border-[#1E3A8A]/40 rounded-lg text-sm text-white placeholder:text-slate-600 focus:outline-none focus:border-[#059669]"/>
           <button onClick={load} disabled={loading}
             className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-50">
             {loading ? '...' : '↻'}
           </button>
         </div>
 
-        {/* Success banner */}
-        {successMsg && (
-          <div className="mx-5 mt-4 bg-emerald-950/30 border border-emerald-700/40 rounded-xl px-4 py-3 flex items-center justify-between">
-            <p className="text-emerald-400 text-xs font-medium">{successMsg}</p>
-            <button onClick={() => setSuccessMsg('\')} className="text-slate-500 hover:text-white text-lg leading-none ml-4">×</button>
+        {/* Active/inactive summary */}
+        {!loading && filtered.length > 0 && (
+          <div className="px-5 py-2.5 border-b border-[#1E3A8A]/40 flex items-center gap-4">
+            <span className="text-xs text-slate-500">{activeCount} active</span>
+            <span className="text-xs text-slate-600">·</span>
+            <span className="text-xs text-slate-500">{inactiveCount} inactive</span>
           </div>
         )}
 
-        {/* Action panel — edit or delete confirmation */}
+        {/* Flash message */}
+        {flash && (
+          <div className="mx-5 mt-4 bg-emerald-950/30 border border-emerald-700/40 rounded-xl px-4 py-2.5">
+            <p className="text-emerald-400 text-xs font-medium">{flash}</p>
+          </div>
+        )}
+
+        {/* Inline edit panel */}
         {action && (
-          <div className={`mx-5 mt-4 rounded-xl px-4 py-4 border ${
-            action.type === 'edit'
-              ? 'bg-blue-950/30 border-blue-800/50'
-              : 'bg-red-950/30 border-red-800/50'
-          }`}>
-            {action.type === 'edit' ? (
-              <>
-                <p className="text-white text-sm font-semibold mb-3">
-                  Rename “{action.entry.value}”
-                </p>
-                <input
-                  type="text"
-                  value={editDraft}
-                  onChange={e => { setEditDraft(e.target.value); setActionError('') }}
-                  onKeyDown={e => { if (e.key === 'Enter') handleEdit(); if (e.key === 'Escape') resetAction() }}
-                  autoFocus
-                  className="w-full px-3 py-2 bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg text-sm text-white focus:outline-none focus:border-[#059669] mb-3"
-                />
-                <p className="text-slate-500 text-xs mb-3 leading-relaxed">
-                  This will update the value in the option list and rename it across all salary records.
-                </p>
-                {actionError && <p className="text-red-400 text-xs mb-3">{actionError}</p>}
-                <div className="flex gap-2">
-                  <button onClick={handleEdit} disabled={busy}
-                    className="px-4 py-2 bg-[#059669] hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors">
-                    {busy ? (
-                      <span className="flex items-center gap-1.5">
-                        <svg className="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-                        </svg>
-                        Saving...
-                      </span>
-                    ) : 'Save & Sync'}
-                  </button>
-                  <button onClick={resetAction} disabled={busy}
-                    className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-50">
-                    Cancel
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <p className="text-white text-sm font-semibold mb-1">Delete “{action.entry.value}”?</p>
-                <p className="text-slate-400 text-xs mb-4 leading-relaxed">
-                  This removes the entry from the option list and blanks the field in any records that used it. Cannot be undone.
-                </p>
-                {actionError && <p className="text-red-400 text-xs mb-3">{actionError}</p>}
-                <div className="flex gap-2">
-                  <button onClick={handleDelete} disabled={busy}
-                    className="px-4 py-2 bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors">
-                    {busy ? (
-                      <span className="flex items-center gap-1.5">
-                        <svg className="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-                        </svg>
-                        Deleting...
-                      </span>
-                    ) : 'Yes, delete'}
-                  </button>
-                  <button onClick={resetAction} disabled={busy}
-                    className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-50">
-                    Cancel
-                  </button>
-                </div>
-              </>
-            )}
+          <div className="mx-5 mt-4 bg-blue-950/30 border border-blue-800/50 rounded-xl px-4 py-4">
+            <p className="text-white text-sm font-semibold mb-3">Rename &ldquo;{action.entry.value}&rdquo;</p>
+            <input type="text" value={editDraft}
+              onChange={e => { setEditDraft(e.target.value); setEditError('') }}
+              onKeyDown={e => { if (e.key === 'Enter') handleEdit(); if (e.key === 'Escape') { setAction(null); setEditError('') } }}
+              autoFocus
+              className="w-full px-3 py-2 bg-[#0F172A] border border-[#1E3A8A]/60 rounded-lg text-sm text-white focus:outline-none focus:border-[#059669] mb-2"/>
+            <p className="text-slate-500 text-xs mb-3">Renames this value in the option list and across all salary records that reference it.</p>
+            {editError && <p className="text-red-400 text-xs mb-3">{editError}</p>}
+            <div className="flex gap-2">
+              <button onClick={handleEdit} disabled={editBusy}
+                className="px-4 py-2 bg-[#059669] hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors">
+                {editBusy ? (
+                  <span className="flex items-center gap-1.5">
+                    <svg className="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                    </svg>
+                    Saving...
+                  </span>
+                ) : 'Save & Sync'}
+              </button>
+              <button onClick={() => { setAction(null); setEditError('') }} disabled={editBusy}
+                className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold rounded-lg transition-colors disabled:opacity-50">
+                Cancel
+              </button>
+            </div>
           </div>
         )}
 
@@ -1054,54 +1085,60 @@ function FieldValuesPanel() {
           <div className="px-5 py-10 text-center text-slate-500 text-sm">Loading...</div>
         ) : filtered.length === 0 ? (
           <div className="px-5 py-10 text-center text-slate-500 text-sm">
-            {search ? 'No values match your search.' : 'No values found.'}
+            {search ? 'No values match your search.' : 'No values found. Run the seed above first.'}
           </div>
         ) : (
-          <div className="divide-y divide-[#1E3A8A]/30 max-h-[480px] overflow-y-auto">
+          <div className="divide-y divide-[#1E3A8A]/30 max-h-[520px] overflow-y-auto">
             {filtered.map(entry => {
-              const isActive = action && action.entry.id === entry.id
+              const isEditTarget = action?.entry.id === entry.id
+              const isToggling = togglingId === entry.id
               return (
                 <div key={entry.id}
                   className={`flex items-center justify-between px-5 py-3.5 gap-3 transition-colors ${
-                    isActive
-                      ? action.type === 'edit' ? 'bg-blue-950/20' : 'bg-red-950/20'
-                      : 'hover:bg-white/5'
+                    isEditTarget ? 'bg-blue-950/20' : 'hover:bg-white/5'
                   }`}>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <p className="text-white text-sm font-medium truncate">{entry.value}</p>
-                      <span className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded-full ${STATUS_BADGE[entry.status] || STATUS_BADGE.pending}`}>
-                        {entry.status}
+                      <p className={`text-sm font-medium truncate ${entry.is_active ? 'text-white' : 'text-slate-500'}`}>
+                        {entry.value}
+                      </p>
+                      {/* Active/inactive pill */}
+                      <span className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
+                        entry.is_active
+                          ? 'bg-emerald-900/40 text-emerald-400 border-emerald-700/40'
+                          : 'bg-slate-800 text-slate-500 border-slate-700'
+                      }`}>
+                        {entry.is_active ? 'active' : 'inactive'}
                       </span>
                     </div>
-                    <p className="text-slate-500 text-xs mt-0.5">
-                      {entry.count > 0
-                        ? `${entry.count} record${entry.count !== 1 ? 's' : ''}`
-                        : 'not used in any record'}
+                    <p className="text-slate-600 text-xs mt-0.5">
+                      {entry.count > 0 ? `${entry.count} record${entry.count !== 1 ? 's' : ''}` : 'not used in any record'}
                     </p>
                   </div>
+
                   <div className="flex gap-1.5 flex-shrink-0">
-                    {/* Edit button */}
+                    {/* Toggle Active/Inactive */}
                     <button
-                      onClick={() => isActive && action.type === 'edit' ? resetAction() : startEdit(entry)}
-                      disabled={busy}
+                      onClick={() => handleToggle(entry)}
+                      disabled={isToggling || editBusy}
+                      title={entry.is_active ? 'Deactivate (hide from dropdowns)' : 'Activate (show in dropdowns)'}
                       className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors disabled:opacity-40 ${
-                        isActive && action.type === 'edit'
+                        entry.is_active
+                          ? 'border-slate-600 text-slate-400 hover:bg-red-950/30 hover:border-red-800 hover:text-red-400'
+                          : 'border-emerald-800/60 text-emerald-500 hover:bg-emerald-950/30'
+                      }`}>
+                      {isToggling ? '...' : entry.is_active ? 'Deactivate' : 'Activate'}
+                    </button>
+                    {/* Edit */}
+                    <button
+                      onClick={() => isEditTarget ? setAction(null) : startEdit(entry)}
+                      disabled={editBusy || isToggling}
+                      className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors disabled:opacity-40 ${
+                        isEditTarget
                           ? 'bg-blue-600 border-blue-600 text-white'
                           : 'border-[#1E3A8A]/60 text-slate-400 hover:bg-white/5 hover:text-white'
                       }`}>
                       Edit
-                    </button>
-                    {/* Delete button */}
-                    <button
-                      onClick={() => isActive && action.type === 'delete' ? resetAction() : startDelete(entry)}
-                      disabled={busy}
-                      className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors disabled:opacity-40 ${
-                        isActive && action.type === 'delete'
-                          ? 'bg-red-600 border-red-600 text-white'
-                          : 'border-red-900/50 text-red-400 hover:bg-red-950/40 hover:border-red-700'
-                      }`}>
-                      Delete
                     </button>
                   </div>
                 </div>
@@ -1113,7 +1150,7 @@ function FieldValuesPanel() {
         {!loading && filtered.length > 0 && (
           <div className="px-5 py-3 border-t border-[#1E3A8A]/40">
             <p className="text-xs text-slate-600">
-              {filtered.length} value{filtered.length !== 1 ? 's' : ''}{search ? ` matching “${search}”` : ' total'}
+              {filtered.length} value{filtered.length !== 1 ? 's' : ''}{search ? ` matching "${search}"` : ' total'}
             </p>
           </div>
         )}
