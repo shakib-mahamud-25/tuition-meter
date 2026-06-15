@@ -3,6 +3,7 @@ import {
   query,
   where,
   getDocs,
+  getDoc,
   addDoc,
   updateDoc,
   deleteDoc,
@@ -356,9 +357,93 @@ export async function rejectPendingItem(collectionName: string, id: string): Pro
   await updateDoc(doc(db, collectionName, id), { status: 'rejected' })
 }
 
+// ─── Sync field values after approval ────────────────────────────────────────
+// When a record is approved, its area / university / department / subjects
+// values are automatically created (or activated) in the corresponding
+// pending_* Firestore collection with is_active: true.
+//
+// This means approving a record in the queue is the only step needed —
+// the Field Values activate/deactivate is secondary and optional (for cleanup).
+//
+// Logic per value:
+//   - If no doc with this value exists → create with status:'approved', is_active:true
+//   - If a doc exists but is_active is false → set is_active:true
+//   - If a doc exists and is already active → do nothing
+
+const FIELD_SYNC_MAP: Array<{
+  recordKey: keyof TuitionRecord
+  collection: string
+  isArray: boolean
+}> = [
+  { recordKey: 'area',        collection: 'pending_areas',        isArray: false },
+  { recordKey: 'university',  collection: 'pending_universities',  isArray: false },
+  { recordKey: 'department',  collection: 'pending_departments',   isArray: false },
+  { recordKey: 'subjects',    collection: 'pending_subjects',      isArray: true  },
+]
+
+async function syncFieldValuesFromRecord(
+  db: Awaited<ReturnType<typeof getDb>>,
+  record: TuitionRecord
+): Promise<void> {
+  for (const { recordKey, collection: colName, isArray } of FIELD_SYNC_MAP) {
+    const rawVal = record[recordKey]
+    const values: string[] = isArray
+      ? (Array.isArray(rawVal) ? (rawVal as string[]) : [])
+      : typeof rawVal === 'string' && rawVal ? [rawVal] : []
+
+    if (values.length === 0) continue
+
+    // Fetch existing docs in this collection
+    const snap = await getDocs(collection(db, colName))
+    const existingByValue = new Map<string, { id: string; is_active: boolean }>()
+    for (const d of snap.docs) {
+      const data = d.data() as { value: string; is_active?: boolean }
+      if (data.value) {
+        existingByValue.set(data.value.toLowerCase(), {
+          id: d.id,
+          is_active: data.is_active !== false,
+        })
+      }
+    }
+
+    const batch = writeBatch(db)
+    let hasWork = false
+
+    for (const value of values) {
+      const key = value.toLowerCase()
+      const existing = existingByValue.get(key)
+
+      if (!existing) {
+        // Create new entry
+        const ref = doc(collection(db, colName))
+        batch.set(ref, {
+          value,
+          status: 'approved',
+          is_active: true,
+          submitted_at: serverTimestamp(),
+        })
+        hasWork = true
+      } else if (!existing.is_active) {
+        // Activate existing inactive entry
+        batch.update(doc(db, colName, existing.id), { is_active: true })
+        hasWork = true
+      }
+      // Already exists and active → nothing to do
+    }
+
+    if (hasWork) await batch.commit()
+  }
+}
+
 export async function approveRecord(id: string): Promise<void> {
   const db = await getDb()
+  // 1. Mark the record approved
   await updateDoc(doc(db, 'tuition_records', id), { status: 'approved' })
+  // 2. Auto-activate its field values in pending_* collections
+  const recordSnap = await getDoc(doc(db, 'tuition_records', id))
+  if (recordSnap.exists()) {
+    await syncFieldValuesFromRecord(db, recordSnap.data() as TuitionRecord)
+  }
 }
 
 export async function rejectRecord(id: string): Promise<void> {
@@ -373,9 +458,18 @@ export async function approveAllInQueue(
   ids: string[]
 ): Promise<void> {
   const db = await getDb()
+  // 1. Approve all records
   await Promise.all(
     ids.map(id => updateDoc(doc(db, collectionName, id), { status: 'approved' }))
   )
+  // 2. If this is the tuition_records queue, sync field values for all approved records
+  if (collectionName === 'tuition_records') {
+    const snap = await getDocs(collection(db, 'tuition_records'))
+    const approvedDocs = snap.docs.filter(d => ids.includes(d.id))
+    await Promise.all(
+      approvedDocs.map(d => syncFieldValuesFromRecord(db, d.data() as TuitionRecord))
+    )
+  }
 }
 
 export async function rejectAllInQueue(
