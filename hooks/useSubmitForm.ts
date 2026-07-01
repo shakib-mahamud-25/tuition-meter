@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback, useEffect } from 'react'
-import { submitTuitionRecord, submitPendingItem, fetchApprovedOptions } from '../lib/benchmark'
+import { submitTuitionRecord, fetchApprovedOptions } from '../lib/benchmark'
 import { trackSalarySubmit, trackCustomItemAdded } from '../lib/analytics'
 import type { SubmitFormData, ApprovedOptions, Curriculum, StudentLevel, AcademicYear, HoursPerSession, TuitionRecord } from '../lib/types'
 
@@ -34,6 +34,15 @@ interface UseSubmitFormReturn {
   addCustomUniversity: (value: string) => Promise<void>
   addCustomDepartment: (value: string) => Promise<void>
 }
+
+// ─── Custom value handling ─────────────────────────────────────────────────────
+// A custom area/subject/university/department typed by the user no longer
+// writes to a separate pending_* collection. It simply becomes the value of
+// that field on the form, and gets submitted as part of the record itself.
+// Once an admin approves the record, fetchApprovedOptions() picks it up
+// automatically (it derives the dropdown list live from approved records).
+// This keeps the dropdown options list in this local session in sync
+// optimistically, so the user can see and use their own new entry right away.
 
 export function useSubmitForm(): UseSubmitFormReturn {
   const [form, setForm] = useState<SubmitFormData>(initialForm)
@@ -75,9 +84,7 @@ export function useSubmitForm(): UseSubmitFormReturn {
   }
 
   const handleSubmit = useCallback(async () => {
-    // Honeypot check
     if (form.honeypot) return
-
     if (!validate()) return
 
     setSubmitting(true)
@@ -114,31 +121,31 @@ export function useSubmitForm(): UseSubmitFormReturn {
     setSubmitted(false)
   }, [])
 
+  // Custom value handlers — purely local now. No Firestore write happens here;
+  // the value is submitted as part of the record in handleSubmit() above, and
+  // becomes a permanent dropdown option once an admin approves that record.
+
   const addCustomArea = useCallback(async (value: string) => {
-    await submitPendingItem('pending_areas', value)
     await trackCustomItemAdded('area', value)
-    setOptions(prev => prev ? { ...prev, areas: [...prev.areas, value].sort() } : prev)
+    setOptions(prev => prev ? { ...prev, areas: [...new Set([...prev.areas, value])].sort() } : prev)
     update('area', value)
   }, [update])
 
   const addCustomSubject = useCallback(async (value: string) => {
-    await submitPendingItem('pending_subjects', value)
     await trackCustomItemAdded('subject', value)
-    setOptions(prev => prev ? { ...prev, subjects: [...prev.subjects, value].sort() } : prev)
+    setOptions(prev => prev ? { ...prev, subjects: [...new Set([...prev.subjects, value])].sort() } : prev)
     update('subjects', [...form.subjects, value])
   }, [update, form.subjects])
 
   const addCustomUniversity = useCallback(async (value: string) => {
-    await submitPendingItem('pending_universities', value)
     await trackCustomItemAdded('university', value)
-    setOptions(prev => prev ? { ...prev, universities: [...prev.universities, value].sort() } : prev)
+    setOptions(prev => prev ? { ...prev, universities: [...new Set([...prev.universities, value])].sort() } : prev)
     update('university', value)
   }, [update])
 
   const addCustomDepartment = useCallback(async (value: string) => {
-    await submitPendingItem('pending_departments', value)
     await trackCustomItemAdded('department', value)
-    setOptions(prev => prev ? { ...prev, departments: [...prev.departments, value].sort() } : prev)
+    setOptions(prev => prev ? { ...prev, departments: [...new Set([...prev.departments, value])].sort() } : prev)
     update('department', value)
   }, [update])
 

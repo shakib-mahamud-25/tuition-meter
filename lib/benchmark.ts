@@ -6,11 +6,9 @@ import {
   getDoc,
   addDoc,
   updateDoc,
-  deleteDoc,
   doc,
   serverTimestamp,
   Timestamp,
-  writeBatch,
 } from 'firebase/firestore'
 import { getDb } from './firebase/config'
 import { AREAS, SUBJECTS, UNIVERSITIES, DEPARTMENTS } from './data'
@@ -84,8 +82,6 @@ function getTimestamp(createdAt: Timestamp | Date | null | undefined): number {
 }
 
 // ─── Histogram builder ────────────────────────────────────────────────────────
-// Produces 6–8 human-friendly salary buckets covering [min, max].
-// Bucket boundaries are rounded to "nice" numbers so labels are readable.
 
 function buildHistogram(sortedSalaries: number[]): HistogramBucket[] {
   if (sortedSalaries.length === 0) return []
@@ -95,12 +91,10 @@ function buildHistogram(sortedSalaries: number[]): HistogramBucket[] {
     return [{ label: formatBDT(min), rangeMin: min, rangeMax: max, count: sortedSalaries.length }]
   }
 
-  // Choose a "nice" step size that yields 6–8 buckets
   const rawRange = max - min
   const targetBuckets = 7
   const rawStep = rawRange / targetBuckets
 
-  // Round step up to nearest nice number (500, 1000, 2000, 5000, 10000…)
   const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep)))
   const niceMultiples = [1, 2, 2.5, 5, 10]
   let step = magnitude * 10
@@ -109,17 +103,15 @@ function buildHistogram(sortedSalaries: number[]): HistogramBucket[] {
     if (candidate >= rawStep) { step = candidate; break }
   }
 
-  // First boundary: floor min to nearest step
   const firstBoundary = Math.floor(min / step) * step
   const boundaries: number[] = []
   let b = firstBoundary
   while (b <= max + step) {
     boundaries.push(b)
     b += step
-    if (boundaries.length > 12) break // safety cap
+    if (boundaries.length > 12) break
   }
 
-  // Build buckets
   const buckets: HistogramBucket[] = []
   for (let i = 0; i < boundaries.length - 1; i++) {
     const rangeMin = boundaries[i]
@@ -127,7 +119,6 @@ function buildHistogram(sortedSalaries: number[]): HistogramBucket[] {
     const count = sortedSalaries.filter(s =>
       i === boundaries.length - 2 ? s >= rangeMin && s <= rangeMax : s >= rangeMin && s < rangeMax
     ).length
-    // Only include buckets that overlap [min, max]
     if (rangeMax < min || rangeMin > max) continue
     const kLabel = (v: number) => v >= 1000 ? `${v / 1000 % 1 === 0 ? v / 1000 : (v / 1000).toFixed(1)}k` : v.toString()
     buckets.push({
@@ -141,7 +132,6 @@ function buildHistogram(sortedSalaries: number[]): HistogramBucket[] {
 }
 
 // ─── Breakdown builder ────────────────────────────────────────────────────────
-// Groups records by a string key and computes average salary per group.
 
 function buildBreakdown(
   records: TuitionRecord[],
@@ -220,13 +210,11 @@ export async function fetchBenchmarkData(
     ...(d.data() as TuitionRecord),
   }))
 
-  // Date window filter
   records = records.filter(r => {
     const ts = getTimestamp(r.created_at)
     return ts >= cutoff
   })
 
-  // Apply all other filters client-side
   if (filters.area) records = records.filter(r => r.area === filters.area)
   if (filters.student_level) records = records.filter(r => r.student_level === filters.student_level)
   if (filters.curriculum) records = records.filter(r => r.curriculum === filters.curriculum)
@@ -265,7 +253,6 @@ export async function fetchBenchmarkData(
     }
   }
 
-  // Freshness-weighted average
   let weightedSum = 0
   let totalWeight = 0
   for (const r of records) {
@@ -284,7 +271,6 @@ export async function fetchBenchmarkData(
     p25: Math.round(percentile(salaries, 25)),
     p75: Math.round(percentile(salaries, 75)),
     confidence: getConfidence(sample_size),
-    // ── Visualisation data ────────────────────────────────────────────────────
     histogram: buildHistogram(salaries),
     levelBreakdown: buildBreakdown(records, 'student_level'),
     curriculumBreakdown: buildBreakdown(records, 'curriculum'),
@@ -307,6 +293,10 @@ function isSuspicious(data: { salary: number; student_level: string }): boolean 
 }
 
 // ─── Submit tuition record ────────────────────────────────────────────────────
+// Custom values (new areas/universities/etc typed by the user) ride along
+// inside the record itself — no separate pending_* write. Once an admin
+// approves this record, the value becomes available in dropdowns automatically
+// (see fetchApprovedOptions, which derives options live from approved records).
 
 export async function submitTuitionRecord(
   data: Omit<TuitionRecord, 'id' | 'status' | 'is_suspicious' | 'created_at' | 'source_version' | 'submitted_from'>
@@ -331,119 +321,15 @@ export async function submitTuitionRecord(
   }
 }
 
-// ─── Submit pending item ──────────────────────────────────────────────────────
-
-export async function submitPendingItem(
-  collectionName: 'pending_areas' | 'pending_subjects' | 'pending_universities' | 'pending_departments',
-  value: string
-): Promise<void> {
-  const db = await getDb()
-  await addDoc(collection(db, collectionName), {
-    value,
-    status: 'pending',
-    submitted_at: serverTimestamp(),
-  })
-}
-
-// ─── Approve / reject pending item ───────────────────────────────────────────
-
-export async function approvePendingItem(collectionName: string, id: string): Promise<void> {
-  const db = await getDb()
-  await updateDoc(doc(db, collectionName, id), { status: 'approved' })
-}
-
-export async function rejectPendingItem(collectionName: string, id: string): Promise<void> {
-  const db = await getDb()
-  await updateDoc(doc(db, collectionName, id), { status: 'rejected' })
-}
-
-// ─── Sync field values after approval ────────────────────────────────────────
-// When a record is approved, its area / university / department / subjects
-// values are automatically created (or activated) in the corresponding
-// pending_* Firestore collection with is_active: true.
-//
-// This means approving a record in the queue is the only step needed —
-// the Field Values activate/deactivate is secondary and optional (for cleanup).
-//
-// Logic per value:
-//   - If no doc with this value exists → create with status:'approved', is_active:true
-//   - If a doc exists but is_active is false → set is_active:true
-//   - If a doc exists and is already active → do nothing
-
-const FIELD_SYNC_MAP: Array<{
-  recordKey: keyof TuitionRecord
-  collection: string
-  isArray: boolean
-}> = [
-  { recordKey: 'area',        collection: 'pending_areas',        isArray: false },
-  { recordKey: 'university',  collection: 'pending_universities',  isArray: false },
-  { recordKey: 'department',  collection: 'pending_departments',   isArray: false },
-  { recordKey: 'subjects',    collection: 'pending_subjects',      isArray: true  },
-]
-
-async function syncFieldValuesFromRecord(
-  db: Awaited<ReturnType<typeof getDb>>,
-  record: TuitionRecord
-): Promise<void> {
-  for (const { recordKey, collection: colName, isArray } of FIELD_SYNC_MAP) {
-    const rawVal = record[recordKey]
-    const values: string[] = isArray
-      ? (Array.isArray(rawVal) ? (rawVal as string[]) : [])
-      : typeof rawVal === 'string' && rawVal ? [rawVal] : []
-
-    if (values.length === 0) continue
-
-    // Fetch existing docs in this collection
-    const snap = await getDocs(collection(db, colName))
-    const existingByValue = new Map<string, { id: string; is_active: boolean }>()
-    for (const d of snap.docs) {
-      const data = d.data() as { value: string; is_active?: boolean }
-      if (data.value) {
-        existingByValue.set(data.value.toLowerCase(), {
-          id: d.id,
-          is_active: data.is_active !== false,
-        })
-      }
-    }
-
-    const batch = writeBatch(db)
-    let hasWork = false
-
-    for (const value of values) {
-      const key = value.toLowerCase()
-      const existing = existingByValue.get(key)
-
-      if (!existing) {
-        // Create new entry
-        const ref = doc(collection(db, colName))
-        batch.set(ref, {
-          value,
-          status: 'approved',
-          is_active: true,
-          submitted_at: serverTimestamp(),
-        })
-        hasWork = true
-      } else if (!existing.is_active) {
-        // Activate existing inactive entry
-        batch.update(doc(db, colName, existing.id), { is_active: true })
-        hasWork = true
-      }
-      // Already exists and active → nothing to do
-    }
-
-    if (hasWork) await batch.commit()
-  }
-}
+// ─── Approve / reject a single record ─────────────────────────────────────────
+// Approving a record is the ONLY step needed for its field values (area,
+// university, department, subjects) to start appearing in dropdowns —
+// fetchApprovedOptions derives options live from approved tuition_records,
+// so there is nothing else to sync.
 
 export async function approveRecord(id: string): Promise<void> {
   const db = await getDb()
-  // 1. Mark the record approved
   await updateDoc(doc(db, 'tuition_records', id), { status: 'approved' })
-  // 2. Auto-activate its field values in pending_* collections
-  const recordSnap = await getDoc(doc(db, 'tuition_records', id))
-  if (recordSnap.exists()) {
-    await syncFieldValuesFromRecord(db, recordSnap.data() as TuitionRecord)
-  }
 }
 
 export async function rejectRecord(id: string): Promise<void> {
@@ -451,62 +337,56 @@ export async function rejectRecord(id: string): Promise<void> {
   await updateDoc(doc(db, 'tuition_records', id), { status: 'rejected' })
 }
 
-// ─── Approve / reject ALL items in a queue ───────────────────────────────────
+// ─── Approve / reject ALL pending records ─────────────────────────────────────
 
-export async function approveAllInQueue(
-  collectionName: string,
-  ids: string[]
-): Promise<void> {
-  const db = await getDb()
-  // 1. Approve all records
-  await Promise.all(
-    ids.map(id => updateDoc(doc(db, collectionName, id), { status: 'approved' }))
-  )
-  // 2. If this is the tuition_records queue, sync field values for all approved records
-  if (collectionName === 'tuition_records') {
-    const snap = await getDocs(collection(db, 'tuition_records'))
-    const approvedDocs = snap.docs.filter(d => ids.includes(d.id))
-    await Promise.all(
-      approvedDocs.map(d => syncFieldValuesFromRecord(db, d.data() as TuitionRecord))
-    )
-  }
-}
-
-export async function rejectAllInQueue(
-  collectionName: string,
-  ids: string[]
-): Promise<void> {
+export async function approveAllRecords(ids: string[]): Promise<void> {
   const db = await getDb()
   await Promise.all(
-    ids.map(id => updateDoc(doc(db, collectionName, id), { status: 'rejected' }))
+    ids.map(id => updateDoc(doc(db, 'tuition_records', id), { status: 'approved' }))
   )
 }
 
-// ─── Fetch approved options ───────────────────────────────────────────────────
-// Reads ONLY from Firestore pending_* collections (status == 'approved').
-// After running seedOptionLists() once, the static lib/data.ts arrays are no
-// longer needed as a source — Firestore is the single source of truth.
-// Falls back to static arrays only if Firestore is completely unreachable.
+export async function rejectAllRecords(ids: string[]): Promise<void> {
+  const db = await getDb()
+  await Promise.all(
+    ids.map(id => updateDoc(doc(db, 'tuition_records', id), { status: 'rejected' }))
+  )
+}
+
+// ─── Fetch approved options (for submit form + benchmark filters) ─────────────
+// Derived LIVE from distinct values across approved tuition_records, merged
+// with the static seed lists in lib/data.ts. Deduplicated case-insensitively
+// so "Bosila" and "bosila" never appear as two separate dropdown entries —
+// whichever casing was approved FIRST wins and is shown.
+//
+// There is no separate pending_* collection anymore. A value appears in the
+// dropdown the moment a record using it is approved.
 
 export async function fetchApprovedOptions(): Promise<ApprovedOptions> {
   try {
     const db = await getDb()
-    const [areasSnap, subjectsSnap, unisSnap, deptsSnap] = await Promise.all([
-      getDocs(query(collection(db, 'pending_areas'), where('is_active', '==', true))),
-      getDocs(query(collection(db, 'pending_subjects'), where('is_active', '==', true))),
-      getDocs(query(collection(db, 'pending_universities'), where('is_active', '==', true))),
-      getDocs(query(collection(db, 'pending_departments'), where('is_active', '==', true))),
-    ])
-    const toSorted = (snap: typeof areasSnap) =>
-      snap.docs.map(d => (d.data() as { value: string }).value).sort()
+    const snap = await getDocs(
+      query(collection(db, 'tuition_records'), where('status', '==', 'approved'))
+    )
+    const records = snap.docs.map(d => d.data() as TuitionRecord)
+
+    const dedupe = (seed: string[], extracted: string[]): string[] => {
+      const seenLower = new Map<string, string>()
+      for (const v of [...seed, ...extracted]) {
+        if (!v) continue
+        const key = v.toLowerCase()
+        if (!seenLower.has(key)) seenLower.set(key, v)
+      }
+      return [...seenLower.values()].sort()
+    }
+
     return {
-      areas:       toSorted(areasSnap),
-      subjects:    toSorted(subjectsSnap),
-      universities: toSorted(unisSnap),
-      departments: toSorted(deptsSnap),
+      areas:        dedupe(AREAS, records.map(r => r.area)),
+      subjects:     dedupe(SUBJECTS, records.flatMap(r => r.subjects || [])),
+      universities: dedupe(UNIVERSITIES, records.map(r => r.university)),
+      departments:  dedupe(DEPARTMENTS, records.map(r => r.department)),
     }
   } catch {
-    // Firestore unreachable — emergency fallback to static lists
     return {
       areas:        [...AREAS].sort(),
       subjects:     [...SUBJECTS].sort(),
@@ -516,77 +396,9 @@ export async function fetchApprovedOptions(): Promise<ApprovedOptions> {
   }
 }
 
-// ─── Seed option lists from static defaults ───────────────────────────────────
-// ONE-TIME operation. Writes every value from lib/data.ts into the corresponding
-// pending_* Firestore collection with status: 'approved', skipping any value
-// that already exists (case-insensitive match).
-//
-// After this runs, the Field Values panel shows and manages everything —
-// preloaded and custom — from a single place.
-//
-// Returns counts of how many were written vs skipped per collection.
-
-export interface SeedResult {
-  areas:        { written: number; skipped: number }
-  subjects:     { written: number; skipped: number }
-  universities: { written: number; skipped: number }
-  departments:  { written: number; skipped: number }
-}
-
-export async function seedOptionLists(): Promise<SeedResult> {
-  const db = await getDb()
-
-  const collections: Array<{
-    name: string
-    key: keyof SeedResult
-    values: string[]
-  }> = [
-    { name: 'pending_areas',        key: 'areas',        values: AREAS },
-    { name: 'pending_subjects',     key: 'subjects',     values: SUBJECTS },
-    { name: 'pending_universities', key: 'universities', values: UNIVERSITIES },
-    { name: 'pending_departments',  key: 'departments',  values: DEPARTMENTS },
-  ]
-
-  const result: SeedResult = {
-    areas:        { written: 0, skipped: 0 },
-    subjects:     { written: 0, skipped: 0 },
-    universities: { written: 0, skipped: 0 },
-    departments:  { written: 0, skipped: 0 },
-  }
-
-  for (const col of collections) {
-    // Fetch existing values in this collection
-    const snap = await getDocs(collection(db, col.name))
-    const existingLower = new Set(
-      snap.docs.map(d => ((d.data() as { value: string }).value || '').toLowerCase())
-    )
-
-    // Write in batches of 500 (Firestore writeBatch limit)
-    const toWrite = col.values.filter(v => !existingLower.has(v.toLowerCase()))
-    result[col.key].skipped = col.values.length - toWrite.length
-
-    const BATCH_SIZE = 499
-    for (let i = 0; i < toWrite.length; i += BATCH_SIZE) {
-      const batch = writeBatch(db)
-      const chunk = toWrite.slice(i, i + BATCH_SIZE)
-      for (const value of chunk) {
-        const ref = doc(collection(db, col.name))
-        batch.set(ref, {
-          value,
-          status: 'approved',
-          is_active: true,
-          submitted_at: serverTimestamp(),
-        })
-      }
-      await batch.commit()
-      result[col.key].written += chunk.length
-    }
-  }
-
-  return result
-}
-
 // ─── Filter counts ────────────────────────────────────────────────────────────
+// Counts how many approved records exist per option value, for the benchmark
+// filter sidebar labels (e.g. "Bangla Medium (150)").
 
 export async function fetchFilterCounts(): Promise<FilterCounts> {
   try {
@@ -614,9 +426,7 @@ export async function fetchFilterCounts(): Promise<FilterCounts> {
       if (r.academic_year) academic_years[r.academic_year] = (academic_years[r.academic_year] || 0) + 1
       if (r.days_per_week) days_per_week[r.days_per_week] = (days_per_week[r.days_per_week] || 0) + 1
       if (Array.isArray(r.subjects)) {
-        for (const s of r.subjects) {
-          subjects[s] = (subjects[s] || 0) + 1
-        }
+        for (const s of r.subjects) subjects[s] = (subjects[s] || 0) + 1
       }
     }
 
@@ -656,7 +466,7 @@ export async function fetchSiteStats(): Promise<SiteStats> {
   }
 }
 
-// ─── Admin stats ──────────────────────────────────────────────────────────────
+// ─── Admin dashboard stats ─────────────────────────────────────────────────────
 
 export async function fetchAdminStats(): Promise<AdminStats> {
   const db = await getDb()
@@ -678,19 +488,23 @@ export async function fetchAdminStats(): Promise<AdminStats> {
   }
 }
 
-// ─── Fetch pending queues ─────────────────────────────────────────────────────
+// ─── Fetch pending salary reports (moderation queue) ───────────────────────────
 
-export async function fetchPendingQueue(
-  collectionName: string
-): Promise<Array<TuitionRecord & { id: string }>> {
+export async function fetchPendingRecords(): Promise<Array<TuitionRecord & { id: string }>> {
   const db = await getDb()
   const snap = await getDocs(
-    query(collection(db, collectionName), where('status', '==', 'pending'))
+    query(collection(db, 'tuition_records'), where('status', '==', 'pending'))
   )
-  return snap.docs.map(d => ({ id: d.id, ...(d.data() as TuitionRecord) }))
+  return snap.docs
+    .map(d => ({ id: d.id, ...(d.data() as TuitionRecord) }))
+    .sort((a, b) => {
+      const ta = a.created_at instanceof Timestamp ? a.created_at.toMillis() : 0
+      const tb = b.created_at instanceof Timestamp ? b.created_at.toMillis() : 0
+      return tb - ta
+    })
 }
 
-// ─── Fetch ALL records ────────────────────────────────────────────────────────
+// ─── Fetch ALL records (for All Reports tab) ───────────────────────────────────
 
 export async function fetchAllRecords(): Promise<Array<TuitionRecord & { id: string }>> {
   const db = await getDb()
@@ -704,7 +518,8 @@ export async function fetchAllRecords(): Promise<Array<TuitionRecord & { id: str
     })
 }
 
-// ─── Update record fields ─────────────────────────────────────────────────────
+// ─── Update record fields ──────────────────────────────────────────────────────
+// Used by the edit modal in both Moderation Queue and All Reports.
 
 export async function updateRecordFields(
   id: string,
@@ -714,248 +529,11 @@ export async function updateRecordFields(
   await updateDoc(doc(db, 'tuition_records', id), { ...fields })
 }
 
-// ─── Fetch ALL items from a pending collection ────────────────────────────────
+// ─── Fetch a single record by ID ───────────────────────────────────────────────
 
-export interface PendingItemDoc {
-  id: string
-  value: string
-  status: 'pending' | 'approved' | 'rejected'
-  submitted_at?: Timestamp | null
-}
-
-export async function fetchAllPendingItems(
-  collectionName: string
-): Promise<PendingItemDoc[]> {
+export async function fetchRecordById(id: string): Promise<(TuitionRecord & { id: string }) | null> {
   const db = await getDb()
-  const snap = await getDocs(collection(db, collectionName))
-  return snap.docs
-    .map(d => ({ id: d.id, ...(d.data() as Omit<PendingItemDoc, 'id'>) }))
-    .sort((a, b) => {
-      const ta = a.submitted_at instanceof Timestamp ? a.submitted_at.toMillis() : 0
-      const tb = b.submitted_at instanceof Timestamp ? b.submitted_at.toMillis() : 0
-      return tb - ta
-    })
-}
-
-// ─── Update a pending item ────────────────────────────────────────────────────
-
-export async function updatePendingItem(
-  collectionName: string,
-  id: string,
-  fields: Partial<Pick<PendingItemDoc, 'value' | 'status'>>
-): Promise<void> {
-  const db = await getDb()
-  await updateDoc(doc(db, collectionName, id), { ...fields })
-}
-
-// ─── Find & Replace ───────────────────────────────────────────────────────────
-
-export type FindReplaceField = 'area' | 'university' | 'department' | 'subjects'
-
-const FIELD_TO_PENDING: Record<FindReplaceField, string> = {
-  area: 'pending_areas',
-  university: 'pending_universities',
-  department: 'pending_departments',
-  subjects: 'pending_subjects',
-}
-
-export async function findAndReplace(
-  fieldKey: FindReplaceField,
-  findValue: string,
-  replaceValue: string
-): Promise<{ updatedRecords: number; updatedPendingItems: number }> {
-  const db = await getDb()
-  const findLower = findValue.trim().toLowerCase()
-  const replaceClean = replaceValue.trim()
-
-  if (!findLower || !replaceClean) throw new Error('Both find and replace values are required.')
-  if (findLower === replaceClean.toLowerCase()) throw new Error('Find and replace values are identical.')
-
-  const recordsSnap = await getDocs(collection(db, 'tuition_records'))
-  const recordBatch = writeBatch(db)
-  let updatedRecords = 0
-
-  for (const docSnap of recordsSnap.docs) {
-    const data = docSnap.data() as TuitionRecord
-    const ref = doc(db, 'tuition_records', docSnap.id)
-
-    if (fieldKey === 'subjects') {
-      const original = Array.isArray(data.subjects) ? data.subjects : []
-      const updated = original.map(s => s.toLowerCase() === findLower ? replaceClean : s)
-      if (updated.some((s, i) => s !== original[i])) {
-        recordBatch.update(ref, { subjects: updated })
-        updatedRecords++
-      }
-    } else {
-      const current = (data[fieldKey] as string) || ''
-      if (current.toLowerCase() === findLower) {
-        recordBatch.update(ref, { [fieldKey]: replaceClean })
-        updatedRecords++
-      }
-    }
-  }
-
-  await recordBatch.commit()
-
-  const pendingSnap = await getDocs(collection(db, FIELD_TO_PENDING[fieldKey]))
-  const pendingBatch = writeBatch(db)
-  let updatedPendingItems = 0
-
-  for (const docSnap of pendingSnap.docs) {
-    const data = docSnap.data() as { value: string }
-    if ((data.value || '').toLowerCase() === findLower) {
-      pendingBatch.update(doc(db, FIELD_TO_PENDING[fieldKey], docSnap.id), { value: replaceClean })
-      updatedPendingItems++
-    }
-  }
-
-  await pendingBatch.commit()
-  return { updatedRecords, updatedPendingItems }
-}
-
-// ─── Field Values — fetch ALL values from pending_* collections ────────────────────
-// Reads ALL entries from pending_* collections regardless of status or usage.
-// is_active controls whether a value appears in dropdowns.
-// count shows how many tuition_records reference each value -- for info only.
-// Salary records are NEVER modified by toggling is_active.
-
-export type ManagedField = 'area' | 'university' | 'department' | 'subjects'
-
-export interface FieldValueEntry {
-  id: string          // Firestore doc ID in the pending_* collection
-  value: string
-  status: 'pending' | 'approved' | 'rejected'
-  is_active: boolean  // true = shows in dropdowns, false = hidden
-  count: number       // how many tuition_records reference this value (info only)
-}
-
-const MANAGED_FIELD_TO_PENDING: Record<ManagedField, string> = {
-  area:        'pending_areas',
-  university:  'pending_universities',
-  department:  'pending_departments',
-  subjects:    'pending_subjects',
-}
-
-export async function fetchAllFieldValues(): Promise<Record<ManagedField, FieldValueEntry[]>> {
-  const db = await getDb()
-
-  // Count tuition_record references per value -- purely informational
-  const recordsSnap = await getDocs(collection(db, 'tuition_records'))
-  const recordCounts: Record<ManagedField, Record<string, number>> = {
-    area: {}, university: {}, department: {}, subjects: {},
-  }
-  for (const d of recordsSnap.docs) {
-    const r = d.data() as TuitionRecord
-    const inc = (field: ManagedField, val: string) => {
-      if (!val) return
-      recordCounts[field][val] = (recordCounts[field][val] || 0) + 1
-    }
-    inc('area', r.area)
-    inc('university', r.university)
-    inc('department', r.department)
-    if (Array.isArray(r.subjects)) {
-      for (const s of r.subjects) inc('subjects', s)
-    }
-  }
-
-  const fields: ManagedField[] = ['area', 'university', 'department', 'subjects']
-  const result = {} as Record<ManagedField, FieldValueEntry[]>
-
-  for (const field of fields) {
-    const snap = await getDocs(collection(db, MANAGED_FIELD_TO_PENDING[field]))
-    const entries: FieldValueEntry[] = snap.docs.map(d => {
-      const data = d.data() as {
-        value: string
-        status: 'pending' | 'approved' | 'rejected'
-        is_active?: boolean
-      }
-      return {
-        id: d.id,
-        value: data.value || '',
-        status: data.status || 'pending',
-        // Legacy entries (before is_active existed) default to active
-        is_active: data.is_active !== false,
-        count: recordCounts[field][data.value] || 0,
-      }
-    })
-    entries.sort((a, b) => a.value.localeCompare(b.value))
-    result[field] = entries
-  }
-
-  return result
-}
-
-// ─── Toggle active state ──────────────────────────────────────────────────────────────────────────────
-// Sets is_active on the pending_* doc only.
-// Zero effect on tuition_records -- salary data is always preserved.
-
-export async function toggleFieldValueActive(
-  fieldKey: ManagedField,
-  pendingDocId: string,
-  newActiveState: boolean
-): Promise<void> {
-  const db = await getDb()
-  await updateDoc(
-    doc(db, MANAGED_FIELD_TO_PENDING[fieldKey], pendingDocId),
-    { is_active: newActiveState }
-  )
-}
-
-// ─── Edit a field value ──────────────────────────────────────────────────────────────────────────────
-// Renames a value in the pending_* doc AND renames it in all tuition_records.
-// This is a rename only -- no records are deleted or blanked.
-
-export async function editFieldValue(
-  fieldKey: ManagedField,
-  pendingDocId: string,
-  oldValue: string,
-  newValue: string
-): Promise<{ updatedRecords: number }> {
-  const db = await getDb()
-  const oldLower = oldValue.trim().toLowerCase()
-  const newClean = newValue.trim()
-
-  if (!oldLower) throw new Error('Old value is required.')
-  if (!newClean) throw new Error('New value cannot be empty.')
-  if (oldLower === newClean.toLowerCase()) throw new Error('New value is the same as the old one.')
-
-  // 1. Rename in the pending_* doc
-  await updateDoc(doc(db, MANAGED_FIELD_TO_PENDING[fieldKey], pendingDocId), { value: newClean })
-
-  // 2. Rename in all tuition_records that reference the old value
-  const recordsSnap = await getDocs(collection(db, 'tuition_records'))
-  const batch = writeBatch(db)
-  let updatedRecords = 0
-
-  // keyof map to keep TypeScript happy with strict record field access
-  const fieldMap: Record<ManagedField, keyof TuitionRecord> = {
-    area:        'area',
-    university:  'university',
-    department:  'department',
-    subjects:    'subjects',
-  }
-
-  for (const docSnap of recordsSnap.docs) {
-    const data = docSnap.data() as TuitionRecord
-    const ref = doc(db, 'tuition_records', docSnap.id)
-
-    if (fieldKey === 'subjects') {
-      const original = Array.isArray(data.subjects) ? data.subjects : []
-      const updated = original.map(s => s.toLowerCase() === oldLower ? newClean : s)
-      if (updated.some((s, i) => s !== original[i])) {
-        batch.update(ref, { subjects: updated })
-        updatedRecords++
-      }
-    } else {
-      const recordKey = fieldMap[fieldKey]
-      const current = (data[recordKey] as string) || ''
-      if (current.toLowerCase() === oldLower) {
-        batch.update(ref, { [recordKey]: newClean })
-        updatedRecords++
-      }
-    }
-  }
-
-  await batch.commit()
-  return { updatedRecords }
+  const snap = await getDoc(doc(db, 'tuition_records', id))
+  if (!snap.exists()) return null
+  return { id: snap.id, ...(snap.data() as TuitionRecord) }
 }
